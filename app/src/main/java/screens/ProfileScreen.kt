@@ -49,7 +49,7 @@ fun ProfileScreen(navController: NavController) {
 
             // 3. ProfileInfoCard (Hiển thị Email & ID)
             ProfileInfoCard(
-                email = "admin@hotel.com",
+                email = "admin@restaurant.com",
                 id = "1"
             )
 

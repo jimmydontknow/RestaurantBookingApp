@@ -2,15 +2,22 @@ package com.example.restaurantbookingapp.screens
 
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -19,93 +26,373 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
-import org.json.JSONObject
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CreateBookingScreen(navController: NavController) {
     val context = LocalContext.current
     val scrollState = rememberScrollState()
-
-    // --- QUẢN LÝ TRẠNG THÁI NHẬP LIỆU ---
-    var guestName by remember { mutableStateOf("") }
-    var phoneNumber by remember { mutableStateOf("") }
-    var tableNumber by remember { mutableStateOf("") } // Chỉ nhận chuỗi số
-    var depositAmount by remember { mutableStateOf("") }
-    var note by remember { mutableStateOf("") }
     val coroutineScope = rememberCoroutineScope()
 
-    // --- LAMBDA CỤC BỘ GỬI DỮ LIỆU ĐẶT BÀN ---
-    val createBookingLambda = remember {
-        { name: String, phone: String, table: String, deposit: String, noteText: String ->
-            suspend {
-                withContext(Dispatchers.IO) {
-                    var conn: HttpURLConnection? = null
-                    try {
-                        // Gọi API sử dụng endpoint chuẩn có chữ 's'
-                        val url = URL("http://10.0.2.2:3000/api/bookings")
-                        conn = url.openConnection() as HttpURLConnection
-                        conn.requestMethod = "POST"
-                        conn.setRequestProperty("Content-Type", "application/json; utf-8")
-                        conn.setRequestProperty("Accept", "application/json")
-                        conn.connectTimeout = 5000
-                        conn.readTimeout = 5000
-                        conn.doOutput = true
+    // --- TRẠNG THÁI NHẬP LIỆU ---
+    var guestName by remember { mutableStateOf("") }
+    var phoneNumber by remember { mutableStateOf("") }
+    var depositAmount by remember { mutableStateOf("") }
+    var note by remember { mutableStateOf("") }
 
-                        val jsonInputString = JSONObject().apply {
-                            put("guestName", name)
-                            put("phoneNumber", phone)
-                            put("tableNumber", table) // Gửi số (ví dụ: "1") lên server
-                            put("depositAmount", deposit.toIntOrNull() ?: 0)
-                            put("note", noteText)
-                        }.toString()
+    // --- TRẠNG THÁI CHỌN KHU ---
+    var selectedZone by remember { mutableStateOf("A") }
+    var expandedZoneDropdown by remember { mutableStateOf(false) }
 
-                        conn.outputStream.use { os ->
-                            val input = jsonInputString.toByteArray(charset("utf-8"))
-                            os.write(input, 0, input.size)
-                        }
+    // --- TRẠNG THÁI BOTTOM SHEET CHỌN BÀN ---
+    var showTablePicker by remember { mutableStateOf(false) }
 
-                        val responseCode = conn.responseCode
-                        if (responseCode == HttpURLConnection.HTTP_OK || responseCode == HttpURLConnection.HTTP_CREATED) {
-                            Pair(true, "Thành công")
-                        } else {
-                            val errorStream = conn.errorStream
-                            val errorMessage = if (errorStream != null) {
-                                BufferedReader(InputStreamReader(errorStream, "utf-8")).use { it.readText() }
-                            } else {
-                                "Mã lỗi từ Server: $responseCode"
-                            }
-                            // Trích xuất thông báo lỗi thực tế từ JSON nếu cấu trúc trả về là JSON
-                            val cleanMsg = try {
-                                JSONObject(errorMessage).getString("message")
-                            } catch (e: Exception) {
-                                errorMessage
-                            }
-                            Pair(false, cleanMsg)
-                        }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                        Pair(false, "Lỗi kết nối Server: ${e.localizedMessage}")
-                    } finally {
-                        conn?.disconnect()
+    // --- DANH SÁCH BÀN TỪ API ---
+    val allTables = remember { mutableStateListOf<TableData>() }
+    var isLoadingTables by remember { mutableStateOf(false) }
+
+    // --- BÀN ĐÃ CHỌN (có thể chọn nhiều để gộp) ---
+    val selectedTables = remember { mutableStateListOf<TableData>() }
+
+    // Lọc bàn theo khu đang chọn, chỉ hiện bàn còn trống hoặc chưa đặt
+    val tablesInZone = allTables.filter { it.zone == selectedZone }
+
+    // Ngày giờ
+    var bookingDate by remember { mutableStateOf("") }
+    var bookingTime by remember { mutableStateOf("") }
+    var expandedTime by remember { mutableStateOf(false) }
+    val timeSlots = listOf("10:00","11:00","12:00","13:00","17:00","18:00","19:00","20:00","21:00")
+
+    // Tóm tắt bàn đã chọn để hiển thị trên form
+    val tableSummaryDisplay = when {
+        selectedTables.isEmpty() -> "Chưa chọn bàn"
+        selectedTables.size == 1 -> "1 Bàn đơn ${selectedTables[0].tableNumber} (Khu $selectedZone)"
+        else -> "Gộp ${selectedTables.size} bàn: ${selectedTables.joinToString(", ") { it.tableNumber }} (Khu $selectedZone)"
+    }
+
+    // Chuỗi gửi lên server
+    val tableSummaryForServer = when {
+        selectedTables.isEmpty() -> ""
+        selectedTables.size == 1 -> "1 Bàn đơn ${selectedTables[0].tableNumber} Khu $selectedZone"
+        else -> "Gộp ${selectedTables.size} bàn ${selectedTables.joinToString("+") { it.tableNumber }} Khu $selectedZone"
+    }
+
+    // --- HÀM TẢI DANH SÁCH BÀN TỪ API ---
+    suspend fun loadTables() {
+        isLoadingTables = true
+        withContext(Dispatchers.IO) {
+            var conn: HttpURLConnection? = null
+            try {
+                val url = URL("http://10.0.2.2:3000/api/tables")
+                conn = url.openConnection() as HttpURLConnection
+                conn.requestMethod = "GET"
+                conn.connectTimeout = 5000
+                conn.readTimeout = 5000
+
+                if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                    val responseStr = conn.inputStream.bufferedReader().use { it.readText() }
+                    val jsonArray = JSONObject(responseStr).getJSONArray("tables")
+                    val fetched = mutableListOf<TableData>()
+                    for (i in 0 until jsonArray.length()) {
+                        val item = jsonArray.getJSONObject(i)
+                        fetched.add(
+                            TableData(
+                                id = item.getString("id"),
+                                tableNumber = item.optString("tableNumber", ""),
+                                tableName = "BÀN ${item.optString("tableNumber", "")}",
+                                status = item.getString("status"),
+                                zone = item.optString("zone", "A"),
+                            )
+                        )
                     }
+                    withContext(Dispatchers.Main) {
+                        allTables.clear()
+                        allTables.addAll(fetched)
+                        isLoadingTables = false
+                    }
+                } else {
+                    withContext(Dispatchers.Main) { isLoadingTables = false }
                 }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                withContext(Dispatchers.Main) { isLoadingTables = false }
+            } finally {
+                conn?.disconnect()
             }
         }
     }
 
+    // --- HÀM CẬP NHẬT TRẠNG THÁI BÀN ĐÃ CHỌN LÊN SERVER ---
+    suspend fun markTablesAsBooked(tableIds: List<String>) {
+        withContext(Dispatchers.IO) {
+            tableIds.forEach { tableId ->
+                var conn: HttpURLConnection? = null
+                try {
+                    val url = URL("http://10.0.2.2:3000/api/tables/status")
+                    conn = url.openConnection() as HttpURLConnection
+                    conn.requestMethod = "PUT"
+                    conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                    conn.connectTimeout = 5000
+                    conn.readTimeout = 5000
+                    conn.doOutput = true
+
+                    val body = JSONObject().apply {
+                        put("id", tableId)
+                        put("status", "booked") // Trạng thái mới: "booked" = đã đặt
+                    }.toString()
+
+                    conn.outputStream.use { os -> os.write(body.toByteArray(charset("utf-8"))) }
+                    conn.responseCode // Kích hoạt request
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                } finally {
+                    conn?.disconnect()
+                }
+            }
+        }
+    }
+// NGÀY ĐẶT BÀN
+    OutlinedTextField(
+        value = bookingDate,
+        onValueChange = { bookingDate = it },
+        label = { Text("Ngày đặt bàn (YYYY-MM-DD)") },
+        placeholder = { Text("VD: 2025-12-31") },
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(8.dp),
+        colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color(0xFF007AFF), unfocusedContainerColor = Color.White, focusedContainerColor = Color.White)
+    )
+
+// GIỜ ĐẶT BÀN
+    Box(modifier = Modifier.fillMaxWidth()) {
+        OutlinedTextField(
+            value = bookingTime,
+            onValueChange = {},
+            readOnly = true,
+            label = { Text("Giờ đặt bàn") },
+            trailingIcon = { Icon(Icons.Default.ArrowDropDown, null, Modifier.clickable { expandedTime = true }) },
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(8.dp),
+            colors = OutlinedTextFieldDefaults.colors(unfocusedContainerColor = Color.White, focusedContainerColor = Color.White)
+        )
+        DropdownMenu(expanded = expandedTime, onDismissRequest = { expandedTime = false }) {
+            timeSlots.forEach { time ->
+                DropdownMenuItem(text = { Text(time) }, onClick = { bookingTime = time; expandedTime = false })
+            }
+        }
+    }
+    // --- HÀM TẠO ĐẶT BÀN ---
+    suspend fun createBooking(): Boolean {
+        return withContext(Dispatchers.IO) {
+            var conn: HttpURLConnection? = null
+            try {
+                val url = URL("http://10.0.2.2:3000/api/bookings")
+                conn = url.openConnection() as HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                conn.connectTimeout = 5000
+                conn.readTimeout = 5000
+                conn.doOutput = true
+
+                val jsonInputString = JSONObject().apply {
+                    put("guestName", guestName)
+                    put("phoneNumber", phoneNumber)
+                    put("tableNumber", tableSummaryForServer)
+                    put("depositAmount", depositAmount.toIntOrNull() ?: 0)
+                    put("note", note)
+                    put("bookingDate", bookingDate)   // ĐÃ THÊM
+                    put("bookingTime", bookingTime)   // ĐÃ THÊM
+                }.toString()
+
+                conn.outputStream.use { os ->
+                    os.write(jsonInputString.toByteArray(charset("utf-8")))
+                }
+
+                val code = conn.responseCode
+                code == HttpURLConnection.HTTP_OK || code == HttpURLConnection.HTTP_CREATED
+            } catch (e: Exception) {
+                e.printStackTrace()
+                false
+            } finally {
+                conn?.disconnect()
+            }
+        }
+    }
+
+    // Tải bàn khi mở màn hình
+    LaunchedEffect(Unit) { loadTables() }
+
+    // =========================================================================
+    // BOTTOM SHEET CHỌN BÀN
+    // =========================================================================
+    if (showTablePicker) {
+        ModalBottomSheet(
+            onDismissRequest = { showTablePicker = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = Color.White
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+            ) {
+                // Header bottom sheet
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Chọn bàn — Khu $selectedZone",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    TextButton(onClick = { showTablePicker = false }) {
+                        Text("Xong", color = Color(0xFF007AFF), fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                // Số bàn đã chọn
+                Text(
+                    text = if (selectedTables.isEmpty()) "Chưa chọn bàn nào"
+                    else "Đã chọn ${selectedTables.size} bàn: ${selectedTables.joinToString(", ") { it.tableNumber }}",
+                    fontSize = 13.sp,
+                    color = if (selectedTables.isEmpty()) Color.Gray else Color(0xFF007AFF),
+                    fontWeight = FontWeight.Medium
+                )
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                // Chú thích màu
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    LegendItem(color = Color(0xFFE2F0D9), label = "Trống")
+                    LegendItem(color = Color(0xFF007AFF).copy(alpha = 0.15f), label = "Đang chọn")
+                    LegendItem(color = Color(0xFFFFE5E5), label = "Không có sẵn")
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                if (isLoadingTables) {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().height(200.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(color = Color(0xFF007AFF))
+                    }
+                } else {
+                    // Lưới bàn 4 cột
+                    val gridHeight = (kotlin.math.ceil(tablesInZone.size / 4.0).toInt() * 90).dp
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(4),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth().height(gridHeight),
+                        userScrollEnabled = false
+                    ) {
+                        items(tablesInZone) { table ->
+                            val isSelected = selectedTables.any { it.id == table.id }
+                            // Bàn không chọn được nếu đang occupied hoặc booked
+                            val isUnavailable = table.status != "available"
+
+                            val bgColor = when {
+                                isSelected -> Color(0xFF007AFF).copy(alpha = 0.15f)
+                                isUnavailable -> Color(0xFFFFE5E5)
+                                else -> Color(0xFFE2F0D9)
+                            }
+                            val borderColor = when {
+                                isSelected -> Color(0xFF007AFF)
+                                isUnavailable -> Color(0xFFFFCDD2)
+                                else -> Color(0xFFB7D8A8)
+                            }
+                            val labelColor = when {
+                                isSelected -> Color(0xFF007AFF)
+                                isUnavailable -> Color(0xFFE53935)
+                                else -> Color(0xFF385723)
+                            }
+                            val statusText = when {
+                                isSelected -> "Đang chọn"
+                                table.status == "occupied" -> "Đang dùng"
+                                table.status == "booked" -> "Đã đặt"
+                                table.status != "available" -> "Không có sẵn"
+                                else -> "Trống"
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(80.dp)
+                                    .background(bgColor, RoundedCornerShape(8.dp))
+                                    .border(
+                                        width = if (isSelected) 2.dp else 1.dp,
+                                        color = borderColor,
+                                        shape = RoundedCornerShape(8.dp)
+                                    )
+                                    .clickable(enabled = !isUnavailable) {
+                                        // Toggle chọn/bỏ chọn bàn
+                                        if (isSelected) {
+                                            selectedTables.removeIf { it.id == table.id }
+                                        } else {
+                                            selectedTables.add(table)
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(
+                                        table.tableNumber,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.Black
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        statusText,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = labelColor
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Nút xác nhận chọn bàn
+                Spacer(modifier = Modifier.height(16.dp))
+                Button(
+                    onClick = { showTablePicker = false },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF007AFF)),
+                    enabled = selectedTables.isNotEmpty()
+                ) {
+                    Text(
+                        if (selectedTables.isEmpty()) "Chưa chọn bàn nào"
+                        else "Xác nhận ${selectedTables.size} bàn đã chọn",
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                }
+                Spacer(modifier = Modifier.height(32.dp))
+            }
+        }
+    }
+
+    // =========================================================================
+    // FORM TẠO ĐẶT BÀN
+    // =========================================================================
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    Text(text = "Tạo đặt bàn mới", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = Color.Black)
+                    Text("Tạo đặt bàn phân khu", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = Color.Black)
                 },
                 navigationIcon = {
                     IconButton(onClick = { navController.popBackStack() }) {
@@ -127,82 +414,208 @@ fun CreateBookingScreen(navController: NavController) {
         ) {
             // 1. Tên khách hàng
             OutlinedTextField(
-                value = guestName, onValueChange = { guestName = it },
-                label = { Text("Tên khách hàng") }, placeholder = { Text("Nhập tên khách hàng...") },
-                modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp),
-                colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color(0xFF007AFF), unfocusedContainerColor = Color.White, focusedContainerColor = Color.White)
+                value = guestName,
+                onValueChange = { guestName = it },
+                label = { Text("Tên khách hàng") },
+                placeholder = { Text("Nhập tên khách hàng...") },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = Color(0xFF007AFF),
+                    unfocusedContainerColor = Color.White,
+                    focusedContainerColor = Color.White
+                )
             )
 
             // 2. Số điện thoại
             OutlinedTextField(
-                value = phoneNumber, onValueChange = { phoneNumber = it },
-                label = { Text("Số điện thoại") }, placeholder = { Text("Nhập số điện thoại...") },
+                value = phoneNumber,
+                onValueChange = { phoneNumber = it },
+                label = { Text("Số điện thoại") },
+                placeholder = { Text("Nhập số điện thoại...") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp),
-                colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color(0xFF007AFF), unfocusedContainerColor = Color.White, focusedContainerColor = Color.White)
-            )
-
-            // 3. SỬA ĐỔI: Ô nhập số bàn (Chỉ điền số)
-            OutlinedTextField(
-                value = tableNumber,
-                onValueChange = { input ->
-                    // Bộ lọc chỉ cho phép nhập ký tự số
-                    if (input.all { it.isDigit() }) tableNumber = input
-                },
-                label = { Text("Số bàn (chỉ cần điền số)") },
-                placeholder = { Text("Ví dụ: 1 hoặc 2") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), // Hiện bàn phím số
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(8.dp),
-                colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color(0xFF007AFF), unfocusedContainerColor = Color.White, focusedContainerColor = Color.White)
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = Color(0xFF007AFF),
+                    unfocusedContainerColor = Color.White,
+                    focusedContainerColor = Color.White
+                )
             )
 
-            // 4. Số tiền đặt cọc
+            // 3. CHỌN KHU VỰC
+            Box(modifier = Modifier.fillMaxWidth()) {
+                OutlinedTextField(
+                    value = if (selectedZone == "A") "Khu A — Phòng lạnh (20 bàn, tối đa 10 người/bàn)"
+                    else "Khu B — Ngoài trời (10 bàn, tối đa 20 người/bàn)",
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("Chọn khu vực") },
+                    trailingIcon = {
+                        Icon(
+                            Icons.Default.ArrowDropDown, "Dropdown",
+                            Modifier.clickable { expandedZoneDropdown = true }
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        unfocusedContainerColor = Color.White,
+                        focusedContainerColor = Color.White
+                    )
+                )
+                DropdownMenu(
+                    expanded = expandedZoneDropdown,
+                    onDismissRequest = { expandedZoneDropdown = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Khu A — Phòng lạnh (20 bàn)") },
+                        onClick = {
+                            selectedZone = "A"
+                            selectedTables.clear() // Reset bàn đã chọn khi đổi khu
+                            expandedZoneDropdown = false
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Khu B — Ngoài trời (10 bàn)") },
+                        onClick = {
+                            selectedZone = "B"
+                            selectedTables.clear()
+                            expandedZoneDropdown = false
+                        }
+                    )
+                }
+            }
+
+            // 4. NÚT MỞ SƠ ĐỒ CHỌN BÀN
             OutlinedTextField(
-                value = depositAmount, onValueChange = { depositAmount = it },
-                label = { Text("Số tiền đặt cọc (VND)") }, placeholder = { Text("Ví dụ: 500000") },
+                value = tableSummaryDisplay,
+                onValueChange = {},
+                readOnly = true,
+                label = { Text("Bàn đã chọn") },
+                trailingIcon = {
+                    Icon(
+                        Icons.Default.ArrowDropDown, "Chọn bàn",
+                        Modifier.clickable {
+                            coroutineScope.launch { loadTables() }
+                            showTablePicker = true
+                        }
+                    )
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        coroutineScope.launch { loadTables() }
+                        showTablePicker = true
+                    },
+                shape = RoundedCornerShape(8.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    unfocusedContainerColor = Color.White,
+                    focusedContainerColor = Color.White,
+                    focusedBorderColor = Color(0xFF007AFF)
+                )
+            )
+
+            // Nút mở sơ đồ bàn rõ ràng hơn
+            OutlinedButton(
+                onClick = {
+                    coroutineScope.launch { loadTables() }
+                    showTablePicker = true
+                },
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = RoundedCornerShape(8.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF007AFF))
+            ) {
+                Text(
+                    text = "Mở sơ đồ bàn Khu $selectedZone để chọn",
+                    color = Color(0xFF007AFF),
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp
+                )
+            }
+
+            // 5. Tiền cọc
+            OutlinedTextField(
+                value = depositAmount,
+                onValueChange = { depositAmount = it },
+                label = { Text("Số tiền đặt cọc (VND)") },
+                placeholder = { Text("Ví dụ: 500000") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp),
-                colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color(0xFF007AFF), unfocusedContainerColor = Color.White, focusedContainerColor = Color.White)
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = Color(0xFF007AFF),
+                    unfocusedContainerColor = Color.White,
+                    focusedContainerColor = Color.White
+                )
             )
 
-            // 5. Ghi chú bổ sung
+            // 6. Ghi chú
             OutlinedTextField(
-                value = note, onValueChange = { note = it },
-                label = { Text("Ghi chú bổ sung") }, placeholder = { Text("Yêu cầu đặc biệt của khách hàng...") },
-                modifier = Modifier.fillMaxWidth(), minLines = 3, shape = RoundedCornerShape(8.dp),
-                colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color(0xFF007AFF), unfocusedContainerColor = Color.White, focusedContainerColor = Color.White)
+                value = note,
+                onValueChange = { note = it },
+                label = { Text("Yêu cầu đặc biệt") },
+                placeholder = { Text("Yêu cầu set up món trước...") },
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 2,
+                shape = RoundedCornerShape(8.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = Color(0xFF007AFF),
+                    unfocusedContainerColor = Color.White,
+                    focusedContainerColor = Color.White
+                )
             )
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // NÚT HÀNH ĐỘNG XÁC NHẬN
+            // NÚT XÁC NHẬN TẠO ĐẶT BÀN
             Button(
                 onClick = {
-                    if (guestName.trim().isEmpty() || phoneNumber.trim().isEmpty() || tableNumber.trim().isEmpty()) {
-                        Toast.makeText(context, "Vui lòng nhập đầy đủ Tên, SĐT và Số bàn!", Toast.LENGTH_SHORT).show()
-                    } else {
-                        coroutineScope.launch {
-                            val (isSuccess, serverMessage) = createBookingLambda(
-                                guestName, phoneNumber, tableNumber, depositAmount.ifEmpty { "0" }, note
-                            ).invoke()
-
-                            if (isSuccess) {
-                                Toast.makeText(context, "Đặt bàn thành công cho khách $guestName!", Toast.LENGTH_SHORT).show()
-                                navController.popBackStack()
-                            } else {
-                                // Hiện trực tiếp nguyên nhân lỗi cụ thể từ server trả về lên màn hình
-                                Toast.makeText(context, "Lỗi: $serverMessage", Toast.LENGTH_LONG).show()
+                    when {
+                        guestName.trim().isEmpty() ->
+                            Toast.makeText(context, "Vui lòng nhập tên khách hàng!", Toast.LENGTH_SHORT).show()
+                        phoneNumber.trim().isEmpty() ->
+                            Toast.makeText(context, "Vui lòng nhập số điện thoại!", Toast.LENGTH_SHORT).show()
+                        selectedTables.isEmpty() ->
+                            Toast.makeText(context, "Vui lòng chọn ít nhất 1 bàn!", Toast.LENGTH_SHORT).show()
+                        else -> {
+                            coroutineScope.launch {
+                                // Bước 1: Tạo booking
+                                val success = createBooking()
+                                if (success) {
+                                    // Bước 2: Cập nhật trạng thái các bàn đã chọn → "booked"
+                                    markTablesAsBooked(selectedTables.map { it.id })
+                                    Toast.makeText(
+                                        context,
+                                        "Đặt bàn thành công! ${selectedTables.size} bàn đã được cập nhật trạng thái.",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                    navController.popBackStack()
+                                } else {
+                                    Toast.makeText(context, "Lỗi tạo đặt bàn, thử lại!", Toast.LENGTH_LONG).show()
+                                }
                             }
                         }
                     }
                 },
                 modifier = Modifier.fillMaxWidth().height(50.dp),
                 shape = RoundedCornerShape(10.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF007AFF))
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (selectedTables.isEmpty()) Color.Gray else Color(0xFF007AFF)
+                )
             ) {
                 Text("Xác nhận tạo đặt bàn", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
             }
         }
+    }
+}
+
+// Composable chú thích màu nhỏ
+@Composable
+fun LegendItem(color: Color, label: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(modifier = Modifier.size(10.dp).background(color, RoundedCornerShape(2.dp)))
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(label, fontSize = 11.sp, color = Color.Gray)
     }
 }

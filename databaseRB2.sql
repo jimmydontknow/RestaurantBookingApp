@@ -1,4 +1,24 @@
-﻿-- 1. XÓA CÁC BẢNG VÀ TRIGGER CŨ NẾU ĐANG TỒN TẠI ĐỂ TRÁNH XUNG ĐỘT
+﻿
+CREATE DATABASE RestaurantDB;
+GO
+
+USE RestaurantDB;
+GO
+
+--Tạo bảng chứa dữ liệu tổng quan nhà hàng (Lưu ý: Dùng NVARCHAR cho chuỗi tiếng Việt)
+CREATE TABLE dashboard_stats (
+    id INT IDENTITY(1,1) PRIMARY KEY,
+    availableTables INT DEFAULT 14,
+    occupiedTables INT DEFAULT 6,
+    reservedTables INT DEFAULT 5,
+    cleaningTables INT DEFAULT 2,
+    guestsIn INT DEFAULT 28,
+    guestsOut INT DEFAULT 22,
+    revenue NVARCHAR(50) DEFAULT N'5,600,000 đ',
+    alerts NVARCHAR(MAX)
+);
+GO
+-- 1. XÓA CÁC BẢNG VÀ TRIGGER CŨ NẾU ĐANG TỒN TẠI ĐỂ TRÁNH XUNG ĐỘT
 DROP TRIGGER IF EXISTS trg_AfterInsertBooking;
 DROP TABLE IF EXISTS Bookings;
 DROP TABLE IF EXISTS Tables;
@@ -79,3 +99,33 @@ UPDATE Tables SET CurrentStatus = 'occupied' WHERE CurrentStatus = 'Đang ăn'
 
 -- Kiểm tra lại
 SELECT TableID, TableNumber, CurrentStatus FROM Tables ORDER BY TableNumber
+
+-- Tạo bảng Invoices lưu hóa đơn thanh toán
+CREATE TABLE Invoices (
+    InvoiceID INT IDENTITY(1,1) PRIMARY KEY,
+    BookingID INT NOT NULL,
+    BookingCode NVARCHAR(20),
+    GuestName NVARCHAR(100),
+    GuestPhone NVARCHAR(20),
+    TableSummary NVARCHAR(200),
+    TotalAmount DECIMAL(18,2),
+    PaymentMethod NVARCHAR(20), -- 'cash' hoặc 'transfer'
+    PaidAt DATETIME DEFAULT GETDATE(),
+    Note NVARCHAR(500)
+);
+
+-- Thêm cột PaymentMethod và PaidAt vào Bookings để theo dõi
+ALTER TABLE Bookings ADD PaymentMethod NVARCHAR(20) NULL;
+ALTER TABLE Bookings ADD PaidAt DATETIME NULL;
+
+-- Thêm cột ngày giờ đặt bàn vào Bookings
+ALTER TABLE Bookings ADD BookingDate DATE NULL;
+ALTER TABLE Bookings ADD BookingTime NVARCHAR(10) NULL;
+ALTER TABLE Bookings ADD DepositPaid BIT DEFAULT 0; -- Khách đã thanh toán cọc chưa
+
+ALTER TABLE Bookings
+ADD CustomerUsername NVARCHAR(100) NULL;
+select*from dbo.dashboard_stats
+select*from dbo.Bookings
+select*from dbo.Invoices
+select*from dbo.Tables

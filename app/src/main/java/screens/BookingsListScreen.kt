@@ -3,18 +3,15 @@ package com.example.restaurantbookingapp.screens
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
-import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -30,282 +27,410 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
-import java.text.NumberFormat
-import java.util.Locale
 
-data class BookingData(
-    val id: String,
-    val bookingCode: String,
-    val guestName: String,
-    val guestPhone: String,
-    val tableSummary: String,
-    val totalAmount: Double,
-    val status: String
-)
-
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BookingsListScreen(navController: NavController) {
+    val bookingList = remember { mutableStateListOf<BookingItem>() }
+    var searchQuery by remember { mutableStateOf("") }
+    var selectedFilter by remember { mutableStateOf("Tất cả") }
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
-    var searchQuery by remember { mutableStateOf("") }
-    var selectedFilter by remember { mutableStateOf("Tất cả") }
-    var isRefreshing by remember { mutableStateOf(false) }
-    var isLoadingMore by remember { mutableStateOf(false) }
+    // Trạng thái dialog tùy chọn (nhấn giữ card)
+    var showActionDialog by remember { mutableStateOf(false) }
+    var selectedBookingForAction by remember { mutableStateOf<BookingItem?>(null) }
 
-    // Danh sách lịch đặt bàn động từ SQL Server
-    val rawBookings = remember { mutableStateListOf<BookingData>() }
-
-    // ĐÃ THÊM: Trạng thái cho popup menu nhấn giữ và dialog xác nhận xóa
-    // Khai báo ĐÚNG CHỖ trong BookingsListScreen để dùng được ở cả items và dialog
-    var selectedBooking by remember { mutableStateOf<BookingData?>(null) }
-    var showOptionsMenu by remember { mutableStateOf(false) }
-    var showDeleteDialog by remember { mutableStateOf(false) }
-
-    // Gọi API lấy danh sách KHÁCH ĐẶT BÀN từ Node.js
-    val fetchBookingsFromApi = suspend {
-        withContext(Dispatchers.IO) {
-            var conn: HttpURLConnection? = null
+    // --- HÀM LẤY DANH SÁCH ĐẶT BÀN ---
+    fun fetchBookings() {
+        coroutineScope.launch(Dispatchers.IO) {
             try {
-                // ĐÃ SỬA: Gọi đúng đường dẫn lấy danh sách khách đặt bàn
                 val url = URL("http://10.0.2.2:3000/api/bookings")
-                conn = url.openConnection() as HttpURLConnection
+                val conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"
                 conn.connectTimeout = 5000
                 conn.readTimeout = 5000
-
                 if (conn.responseCode == HttpURLConnection.HTTP_OK) {
                     val responseStr = conn.inputStream.bufferedReader().use { it.readText() }
-                    val jsonObject = JSONObject(responseStr)
-                    val jsonArray = jsonObject.getJSONArray("bookings")
-
-                    val fetchedList = mutableListOf<BookingData>()
+                    val jsonArray = JSONObject(responseStr).getJSONArray("bookings")
+                    val fetched = mutableListOf<BookingItem>()
                     for (i in 0 until jsonArray.length()) {
-                        val item = jsonArray.getJSONObject(i)
-                        fetchedList.add(
-                            BookingData(
-                                id = item.getString("id"),
-                                bookingCode = item.getString("bookingCode"),
-                                guestName = item.getString("guestName"),
-                                guestPhone = item.getString("guestPhone"),
-                                tableSummary = item.getString("tableSummary"),
-                                totalAmount = item.getDouble("totalAmount"),
-                                status = item.getString("status")
+                        val obj = jsonArray.getJSONObject(i)
+                        fetched.add(
+                            BookingItem(
+                                id = obj.optString("id"),
+                                bookingCode = obj.optString("bookingCode"),
+                                guestName = obj.optString("guestName"),
+                                guestPhone = obj.optString("guestPhone"),
+                                tableSummary = obj.optString("tableSummary"),
+                                totalAmount = obj.optDouble("totalAmount", 0.0),
+                                status = obj.optString("status", "pending"),
+
+                                // THÊM
+                                bookingDate = obj.optString("bookingDate", ""),
+                                bookingTime = obj.optString("bookingTime", "")
                             )
                         )
                     }
                     withContext(Dispatchers.Main) {
-                        rawBookings.clear()
-                        rawBookings.addAll(fetchedList)
+                        bookingList.clear()
+                        bookingList.addAll(fetched)
                     }
                 }
+                conn.disconnect()
+            } catch (e: Exception) { e.printStackTrace() }
+        }
+    }
+
+    // --- HÀM CẬP NHẬT TRẠNG THÁI ĐƠN + BÀN LIÊN QUAN ---
+    fun updateBookingStatus(booking: BookingItem, newStatus: String) {
+        coroutineScope.launch {
+            withContext(Dispatchers.IO) {
+                var conn: HttpURLConnection? = null
+                try {
+                    // Bước 1: Cập nhật trạng thái booking
+                    val url = URL("http://10.0.2.2:3000/api/bookings/status")
+                    conn = url.openConnection() as HttpURLConnection
+                    conn.requestMethod = "PUT"
+                    conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                    conn.connectTimeout = 5000
+                    conn.readTimeout = 5000
+                    conn.doOutput = true
+
+                    val body = JSONObject().apply {
+                        put("id", booking.id.toIntOrNull() ?: booking.id)
+                        put("status", newStatus)
+                    }.toString()
+                    conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                    val code = conn.responseCode
+                    conn.disconnect()
+
+                    if (code == HttpURLConnection.HTTP_OK) {
+                        // Bước 2: Cập nhật bàn liên quan nếu cần
+                        if (newStatus == "checked_in" || newStatus == "checked_out") {
+                            val tableStatus = if (newStatus == "checked_in") "occupied" else "available"
+
+                            // ĐÃ SỬA: Gọi trực tiếp logic cập nhật bàn thay vì gọi hàm suspend riêng
+                            try {
+                                val urlTables = URL("http://10.0.2.2:3000/api/tables")
+                                val connTables = urlTables.openConnection() as HttpURLConnection
+                                connTables.requestMethod = "GET"
+                                connTables.connectTimeout = 5000
+                                connTables.readTimeout = 5000
+
+                                if (connTables.responseCode == HttpURLConnection.HTTP_OK) {
+                                    val tablesStr = connTables.inputStream.bufferedReader().use { it.readText() }
+                                    val tablesArray = JSONObject(tablesStr).getJSONArray("tables")
+
+                                    // Tìm mã bàn trong chuỗi tableSummary, ví dụ: "A01", "B02"
+                                    val tableNumberPattern = Regex("[AB]\\d{2}")
+                                    val matchedNumbers = tableNumberPattern.findAll(booking.tableSummary)
+                                        .map { it.value }.toSet()
+
+                                    for (i in 0 until tablesArray.length()) {
+                                        val t = tablesArray.getJSONObject(i)
+                                        val tNum = t.optString("tableNumber", "")
+                                        if (matchedNumbers.contains(tNum)) {
+                                            val tableId = t.getString("id")
+                                            var connUpdate: HttpURLConnection? = null
+                                            try {
+                                                val urlUpdate = URL("http://10.0.2.2:3000/api/tables/status")
+                                                connUpdate = urlUpdate.openConnection() as HttpURLConnection
+                                                connUpdate.requestMethod = "PUT"
+                                                connUpdate.setRequestProperty("Content-Type", "application/json; utf-8")
+                                                connUpdate.connectTimeout = 5000
+                                                connUpdate.readTimeout = 5000
+                                                connUpdate.doOutput = true
+                                                val updateBody = JSONObject().apply {
+                                                    put("id", tableId)
+                                                    put("status", tableStatus)
+                                                }.toString()
+                                                connUpdate.outputStream.use { it.write(updateBody.toByteArray(Charsets.UTF_8)) }
+                                                connUpdate.responseCode
+                                            } finally {
+                                                connUpdate?.disconnect()
+                                            }
+                                        }
+                                    }
+                                }
+                                connTables.disconnect()
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            }
+                        }
+
+                        withContext(Dispatchers.Main) {
+                            fetchBookings()
+                            val msg = when (newStatus) {
+                                "checked_in" -> "Đã xếp bàn! Bàn chuyển sang Đang dùng."
+                                "checked_out" -> "Khách đã rời. Bàn chuyển về Trống."
+                                "cancelled" -> "Đã hủy đặt bàn."
+                                else -> "Cập nhật thành công!"
+                            }
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Lỗi: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                    }
+                } finally {
+                    conn?.disconnect()
+                }
+            }
+        }
+    }
+
+    // --- HÀM CẬP NHẬT BÀN LIÊN QUAN DỰA VÀO tableSummary ---
+    // tableSummary ví dụ: "1 Bàn đơn A01 Khu A" hoặc "Gộp 2 bàn A01+A02 Khu A"
+    suspend fun updateRelatedTables(tableSummary: String, newTableStatus: String) {
+        withContext(Dispatchers.IO) {
+            try {
+                // Lấy danh sách bàn để tìm ID theo tableNumber
+                val urlTables = URL("http://10.0.2.2:3000/api/tables")
+                val connTables = urlTables.openConnection() as HttpURLConnection
+                connTables.requestMethod = "GET"
+                connTables.connectTimeout = 5000
+                connTables.readTimeout = 5000
+
+                if (connTables.responseCode == HttpURLConnection.HTTP_OK) {
+                    val tablesStr = connTables.inputStream.bufferedReader().use { it.readText() }
+                    val tablesArray = JSONObject(tablesStr).getJSONArray("tables")
+
+                    // Tìm các tableNumber trong chuỗi tableSummary
+                    // Ví dụ: "A01", "A02" từ "Gộp 2 bàn A01+A02 Khu A"
+                    val tableNumberPattern = Regex("[AB]\\d{2}")
+                    val matchedNumbers = tableNumberPattern.findAll(tableSummary)
+                        .map { it.value }.toSet()
+
+                    // Tìm tableId tương ứng và cập nhật từng bàn
+                    for (i in 0 until tablesArray.length()) {
+                        val t = tablesArray.getJSONObject(i)
+                        val tNum = t.optString("tableNumber", "")
+                        if (matchedNumbers.contains(tNum)) {
+                            val tableId = t.getString("id")
+                            // Gọi API cập nhật trạng thái bàn
+                            var connUpdate: HttpURLConnection? = null
+                            try {
+                                val urlUpdate = URL("http://10.0.2.2:3000/api/tables/status")
+                                connUpdate = urlUpdate.openConnection() as HttpURLConnection
+                                connUpdate.requestMethod = "PUT"
+                                connUpdate.setRequestProperty("Content-Type", "application/json; utf-8")
+                                connUpdate.connectTimeout = 5000
+                                connUpdate.readTimeout = 5000
+                                connUpdate.doOutput = true
+
+                                val updateBody = JSONObject().apply {
+                                    put("id", tableId)
+                                    put("status", newTableStatus)
+                                }.toString()
+                                connUpdate.outputStream.use { it.write(updateBody.toByteArray(Charsets.UTF_8)) }
+                                connUpdate.responseCode
+                            } finally {
+                                connUpdate?.disconnect()
+                            }
+                        }
+                    }
+                }
+                connTables.disconnect()
             } catch (e: Exception) {
                 e.printStackTrace()
+            }
+        }
+    }
+
+    // --- HÀM HỦY ĐẶT BÀN ---
+    fun cancelBooking(bookingId: String) {
+        coroutineScope.launch(Dispatchers.IO) {
+            var conn: HttpURLConnection? = null
+            try {
+                val url = URL("http://10.0.2.2:3000/api/bookings/status")
+                conn = url.openConnection() as HttpURLConnection
+                conn.requestMethod = "PUT"
+                conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                conn.connectTimeout = 5000
+                conn.readTimeout = 5000
+                conn.doOutput = true
+                val body = JSONObject().apply {
+                    put("id", bookingId.toIntOrNull() ?: bookingId)
+                    put("status", "cancelled")
+                }.toString()
+                conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                val code = conn.responseCode
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "Lỗi nạp dữ liệu lễ tân: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                    if (code == HttpURLConnection.HTTP_OK) {
+                        fetchBookings()
+                        Toast.makeText(context, "Đã hủy đặt bàn!", Toast.LENGTH_SHORT).show()
+                    }
                 }
-            } finally {
-                conn?.disconnect()
-            }
+            } catch (e: Exception) { e.printStackTrace() }
+            finally { conn?.disconnect() }
+        }
+    }
+    // Nhấn "Đã hủy" lần 2 → xóa vĩnh viễn toàn bộ đơn đã hủy
+    fun deleteAllCancelled() {
+        coroutineScope.launch(Dispatchers.IO) {
+            var conn: HttpURLConnection? = null
+            try {
+                val url = URL("http://10.0.2.2:3000/api/bookings/cancelled")
+                conn = url.openConnection() as HttpURLConnection
+                conn.requestMethod = "DELETE"
+                conn.connectTimeout = 5000
+                conn.readTimeout = 5000
+                val code = conn.responseCode
+                withContext(Dispatchers.Main) {
+                    if (code == HttpURLConnection.HTTP_OK) {
+                        fetchBookings()
+                        Toast.makeText(context, "Đã xóa tất cả đơn hủy!", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } catch (e: Exception) { e.printStackTrace() }
+            finally { conn?.disconnect() }
         }
     }
 
-    // Tự động tải danh sách khách khi mở màn hình
-    LaunchedEffect(Unit) {
-        fetchBookingsFromApi()
+    LaunchedEffect(Unit) { fetchBookings() }
+
+    // Lọc danh sách
+    val filteredBookings = bookingList.filter {
+        val matchSearch = it.guestName.contains(searchQuery, ignoreCase = true) ||
+                it.guestPhone.contains(searchQuery) ||
+                it.bookingCode.contains(searchQuery, ignoreCase = true)
+        val matchStatus = when (selectedFilter) {
+            "Chờ xếp bàn" -> it.status == "pending"
+            "Đang phục vụ" -> it.status == "checked_in"
+            "Đã rời" -> it.status == "checked_out"
+            "Đã hủy" -> it.status == "cancelled"
+            else -> it.status != "cancelled"
+        }
+        matchSearch && matchStatus
     }
 
-    val filteredBookings = rawBookings.filter { booking ->
-        val matchesSearch = booking.bookingCode.contains(searchQuery, ignoreCase = true) ||
-                booking.guestName.contains(searchQuery, ignoreCase = true) ||
-                booking.guestPhone.contains(searchQuery, ignoreCase = true)
-
-        val mappedStatus = when (selectedFilter) {
-            "Chờ xếp bàn" -> "pending"
-            "Đang phục vụ" -> "checked_in"
-            "Đã rời đi" -> "checked_out"
-            "Đã hủy" -> "cancelled"
-            else -> "Tất cả"
-        }
-
-        val matchesFilter = when (mappedStatus) {
-            "Tất cả" -> booking.status != "cancelled" // Ẩn "Đã hủy" khỏi tab Tất cả
-            else -> booking.status == mappedStatus
-        }
-
-        matchesSearch && matchesFilter
-    }
-    Column(modifier = Modifier.fillMaxSize().background(Color(0xFFF8F9FA))) {
-        ScreenHeader(
-            title = "Danh sách đặt bàn",
-            rightAction = {
-                Button(
-                    onClick = { navController.navigate("CreateBooking") },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF007AFF)),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = "Add Icon", modifier = Modifier.size(16.dp))
+    Scaffold(
+        floatingActionButton = {
+            FloatingActionButton(
+                onClick = { navController.navigate("create_booking") },
+                containerColor = Color(0xFF007AFF)
+            ) {
+                Row(modifier = Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Add, contentDescription = null, tint = Color.White)
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text(text = "Thêm đặt bàn", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    Text("Đặt phân khu", color = Color.White, fontWeight = FontWeight.Bold)
                 }
             }
-        )
-
-        PullToRefreshBox(
-            isRefreshing = isRefreshing,
-            onRefresh = {
-                coroutineScope.launch {
-                    isRefreshing = true
-                    fetchBookingsFromApi()
-                    isRefreshing = false
-                }
-            },
-            modifier = Modifier.fillMaxSize()
+        }
+    ) { paddingValues ->
+        Column(
+            modifier = Modifier.fillMaxSize().padding(paddingValues).background(Color(0xFFF8F9FA))
         ) {
-            LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-                item {
-                    Spacer(modifier = Modifier.height(16.dp))
-                    SearchBox(
-                        value = searchQuery,
-                        placeholder = "Tìm theo mã, tên khách, số điện thoại...",
-                        onTextChange = { searchQuery = it },
-                        onClear = { searchQuery = "" }
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    HorizontalFilterChips(
-                        activeFilter = selectedFilter,
-                        onSelectFilter = { selectedFilter = it }
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                }
+            Row(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Lễ tân & Phân Khu", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            }
 
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                placeholder = { Text("Tìm mã, tên khách, SĐT...") },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                shape = RoundedCornerShape(12.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = Color.White,
+                    unfocusedContainerColor = Color.White
+                )
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Filter chips
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                listOf("Tất cả", "Chờ xếp bàn", "Đang phục vụ", "Đã rời", "Đã hủy").forEach { filter ->
+                    val isSelected = selectedFilter == filter
+                    Button(
+                        onClick = { selectedFilter = filter },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isSelected) Color(0xFF007AFF) else Color(0xFFE5E5EA)
+                        ),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        shape = RoundedCornerShape(20.dp)
+                    ) {
+                        Text(text = filter, color = if (isSelected) Color.White else Color.DarkGray, fontSize = 12.sp)
+                    }
+                }
+            }
+// Hiện nút "Xóa tất cả đơn hủy" khi đang ở tab Đã hủy
+            if (selectedFilter == "Đã hủy" && filteredBookings.isNotEmpty()) {
+                TextButton(
+                    onClick = { deleteAllCancelled() },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Xóa tất cả đơn đã hủy", color = Color.Red, fontSize = 13.sp)
+                }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 if (filteredBookings.isEmpty()) {
                     item {
                         Box(modifier = Modifier.fillMaxWidth().padding(top = 40.dp), contentAlignment = Alignment.Center) {
-                            Text(text = "Không tìm thấy lịch đặt bàn nào.", color = Color.Gray, fontSize = 14.sp)
+                            Text(
+                                text = if (selectedFilter == "Đã hủy") "Không có đặt bàn nào đã hủy."
+                                else "Không tìm thấy lịch đặt bàn nào.",
+                                color = Color.Gray
+                            )
                         }
                     }
                 } else {
-                    items(items = filteredBookings, key = { it.id }) { bookingItem ->
-                        BookingCard(
-                            booking = bookingItem,
-                            onPress = {
-                                navController.navigate("EditBooking/${bookingItem.id}")
+                    items(filteredBookings, key = { it.id }) { booking ->
+                        BookingCardWithStatus(
+                            booking = booking,
+                            onLongClick = {
+                                selectedBookingForAction = booking
+                                showActionDialog = true
                             },
-                            // ĐÃ THÊM: Nhấn giữ → lưu booking được chọn và hiện popup menu
-                            onLongPress = {
-                                selectedBooking = bookingItem
-                                showOptionsMenu = true
+                            onStatusChange = { newStatus ->
+                                updateBookingStatus(booking, newStatus)
+                            },
+                            // ĐÃ THÊM: Điều hướng sang PaymentScreen
+                            onPayment = {
+                                navController.navigate("Payment/${booking.id}")
                             }
                         )
-                        Spacer(modifier = Modifier.height(12.dp))
                     }
-                }
-
-                item {
-                    if (filteredBookings.isNotEmpty()) {
-                        Box(modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
-                            TextButton(onClick = {
-                                coroutineScope.launch {
-                                    isLoadingMore = true
-                                    fetchBookingsFromApi()
-                                    isLoadingMore = false
-                                }
-                            }) {
-                                if (isLoadingMore) {
-                                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                                } else {
-                                    Text(text = "Tải lại dữ liệu...", color = Color.Gray, fontSize = 13.sp)
-                                }
-                            }
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(80.dp))
                 }
             }
         }
     }
 
-    // ĐÃ THÊM: POPUP MENU khi nhấn giữ card - hiện 2 lựa chọn Sửa và Xóa
-    if (showOptionsMenu && selectedBooking != null) {
+    // Dialog tùy chọn khi nhấn giữ
+    if (showActionDialog && selectedBookingForAction != null) {
+        val booking = selectedBookingForAction!!
         AlertDialog(
-            onDismissRequest = { showOptionsMenu = false },
-            title = {
-                Text("${selectedBooking!!.bookingCode} - ${selectedBooking!!.guestName}", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-            },
-            text = { Text("Bạn muốn thực hiện thao tác gì?", fontSize = 14.sp) },
+            onDismissRequest = { showActionDialog = false },
+            title = { Text("${booking.bookingCode} — ${booking.guestName}", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
+            text = { Text("Bạn muốn thực hiện thao tác gì?") },
             confirmButton = {
-                // Nút Chỉnh sửa → điều hướng sang EditBookingScreen
                 TextButton(onClick = {
-                    showOptionsMenu = false
-                    navController.navigate("EditBooking/${selectedBooking!!.id}")
+                    showActionDialog = false
+                    navController.navigate("EditBooking/${booking.id}")
                 }) {
                     Text("Chỉnh sửa", color = Color(0xFF007AFF), fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
-                // Nút Xóa → mở dialog xác nhận xóa
                 TextButton(onClick = {
-                    showOptionsMenu = false
-                    showDeleteDialog = true
+                    showActionDialog = false
+                    cancelBooking(booking.id)
                 }) {
-                    Text("Xóa", color = Color.Red, fontWeight = FontWeight.Bold)
-                }
-            },
-            containerColor = Color.White,
-            shape = RoundedCornerShape(14.dp)
-        )
-    }
-
-    // ĐÃ THÊM: DIALOG XÁC NHẬN XÓA - tránh xóa nhầm
-    if (showDeleteDialog && selectedBooking != null) {
-        val bookingToDelete = selectedBooking!!
-        AlertDialog(
-            onDismissRequest = { showDeleteDialog = false },
-            title = { Text("Xác nhận xóa", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
-            text = { Text("Bạn có chắc muốn xóa đặt bàn của khách \"${bookingToDelete.guestName}\" không? Hành động này không thể hoàn tác.", fontSize = 14.sp) },
-            confirmButton = {
-                TextButton(onClick = {
-                    showDeleteDialog = false
-                    coroutineScope.launch {
-                        withContext(Dispatchers.IO) {
-                            var conn: HttpURLConnection? = null
-                            try {
-                                // Gọi DELETE /api/bookings/:id lên server
-                                val url = URL("http://10.0.2.2:3000/api/bookings/${bookingToDelete.id}")
-                                conn = url.openConnection() as HttpURLConnection
-                                conn.requestMethod = "DELETE"
-                                conn.connectTimeout = 5000
-                                conn.readTimeout = 5000
-
-                                val responseCode = conn.responseCode
-                                withContext(Dispatchers.Main) {
-                                    if (responseCode == HttpURLConnection.HTTP_OK) {
-                                        // Xóa khỏi danh sách UI ngay lập tức
-                                        rawBookings.removeIf { it.id == bookingToDelete.id }
-                                        Toast.makeText(context, "Đã xóa đặt bàn của ${bookingToDelete.guestName}!", Toast.LENGTH_SHORT).show()
-                                    } else {
-                                        Toast.makeText(context, "Lỗi xóa: mã $responseCode", Toast.LENGTH_SHORT).show()
-                                    }
-                                }
-                            } catch (e: Exception) {
-                                e.printStackTrace()
-                                withContext(Dispatchers.Main) {
-                                    Toast.makeText(context, "Lỗi kết nối: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
-                                }
-                            } finally {
-                                conn?.disconnect()
-                            }
-                        }
-                    }
-                }) {
-                    Text("Xóa", color = Color.Red, fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDeleteDialog = false }) {
-                    Text("Hủy", color = Color.Gray)
+                    Text("Hủy đặt bàn", color = Color.Red, fontWeight = FontWeight.Bold)
                 }
             },
             containerColor = Color.White,
@@ -314,143 +439,110 @@ fun BookingsListScreen(navController: NavController) {
     }
 }
 
-@Composable
-fun ScreenHeader(title: String, rightAction: @Composable () -> Unit) {
-    Surface(modifier = Modifier.fillMaxWidth(), color = Color.White, shadowElevation = 2.dp) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(text = title, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.Black)
-            rightAction()
-        }
-    }
-}
-
-@Composable
-fun SearchBox(value: String, placeholder: String, onTextChange: (String) -> Unit, onClear: () -> Unit) {
-    OutlinedTextField(
-        value = value,
-        onValueChange = onTextChange,
-        modifier = Modifier.fillMaxWidth(),
-        placeholder = { Text(text = placeholder, fontSize = 14.sp, color = Color.Gray) },
-        leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search Icon", tint = Color.Gray) },
-        trailingIcon = {
-            if (value.isNotEmpty()) {
-                Icon(Icons.Default.Clear, contentDescription = "Clear", tint = Color.Gray, modifier = Modifier.clickable { onClear() })
-            }
-        },
-        singleLine = true,
-        shape = RoundedCornerShape(10.dp),
-        colors = TextFieldDefaults.colors(focusedContainerColor = Color.White, unfocusedContainerColor = Color.White)
-    )
-}
-
-@Composable
-fun HorizontalFilterChips(activeFilter: String, onSelectFilter: (String) -> Unit) {
-    val filters = listOf("Tất cả", "Chờ xếp bàn", "Đang phục vụ", "Đã rời đi", "Đã hủy")
-    val scrollState = rememberScrollState()
-    // KHÔNG khai báo selectedBooking/showOptionsMenu/showDeleteDialog ở đây
-    // Các biến đó đã được khai báo đúng chỗ trong BookingsListScreen phía trên
-    Row(
-        modifier = Modifier.fillMaxWidth().horizontalScroll(scrollState),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        filters.forEach { name ->
-            val isActive = activeFilter == name
-            Surface(
-                modifier = Modifier.clickable { onSelectFilter(name) },
-                color = if (isActive) Color(0xFF007AFF) else Color(0xFFE5E5EA),
-                shape = RoundedCornerShape(20.dp)
-            ) {
-                Text(
-                    text = name,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                    color = if (isActive) Color.White else Color.DarkGray,
-                    fontSize = 13.sp,
-                    fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal
-                )
-            }
-        }
-    }
-}
-
+// =========================================================================
+// BOOKING CARD CÓ NÚT CHUYỂN TRẠNG THÁI
+// =========================================================================
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun BookingCard(booking: BookingData, onPress: () -> Unit, onLongPress: () -> Unit) {
-    val vietnameseLocale = Locale("vi", "VN")
-    val currencyFormatter = NumberFormat.getCurrencyInstance(vietnameseLocale)
+fun BookingCardWithStatus(
+    booking: BookingItem,
+    onLongClick: () -> Unit,
+    onStatusChange: (String) -> Unit,
+    onPayment: () -> Unit
+)
+{
+    // Màu và nhãn theo trạng thái hiện tại
+    val (statusText, statusColor) = when (booking.status) {
+        "pending" -> "Chờ xếp bàn" to Color(0xFFFF9500)
+        "checked_in" -> "Đang phục vụ" to Color(0xFF28A745)
+        "checked_out" -> "Đã rời" to Color(0xFF636366)
+        "cancelled" -> "Đã hủy" to Color(0xFF8E8E93)
+        else -> "Không xác định" to Color.Gray
+    }
 
+    // Nút hành động tiếp theo tùy trạng thái hiện tại
+    val nextAction: Pair<String, String>? = when (booking.status) {
+        "pending" -> "checked_in" to "Xếp bàn"
+        // ĐÃ SỬA: Đổi "Rời bàn" thành "Thanh toán", điều hướng sang PaymentScreen
+        "checked_in" -> "payment" to "Thanh toán"
+        else -> null
+    }
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            // ĐÃ THÊM: combinedClickable để xử lý cả nhấn thường lẫn nhấn giữ
-            .combinedClickable(
-                onClick = { onPress() },
-                onLongClick = { onLongPress() }
-            ),
+            .combinedClickable(onClick = {}, onLongClick = onLongClick),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White),
-        shape = RoundedCornerShape(12.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
+            // Dòng 1: Tên khách + mã booking
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(text = booking.guestName, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Text(text = booking.bookingCode, fontWeight = FontWeight.Bold, color = Color(0xFF007AFF), fontSize = 14.sp)
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(text = "SĐT: ${booking.guestPhone}", color = Color.Gray, fontSize = 14.sp)
+            Text(text = booking.tableSummary, color = Color(0xFFFF9500), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Text(
+                text = "🕒 ${booking.bookingDate} • ${booking.bookingTime}",
+                color = Color.Gray,
+                fontSize = 12.sp
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            HorizontalDivider(color = Color(0xFFE5E5EA))
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Dòng cuối: Badge trạng thái + Số tiền + Nút hành động
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(text = "Mã: " + booking.bookingCode, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color.Black)
-                StatusBadge(statusType = booking.status)
-            }
-            Spacer(modifier = Modifier.height(10.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Person, contentDescription = "Guest Icon", tint = Color.Gray, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(text = booking.guestName, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Color.Black)
-            }
-            Spacer(modifier = Modifier.height(6.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.DateRange, contentDescription = "Table Icon", tint = Color.Gray, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(text = booking.tableSummary, fontSize = 14.sp, color = Color.Gray)
-            }
-            Spacer(modifier = Modifier.height(12.dp))
-            HorizontalDivider(color = Color(0xFFF2F2F7), thickness = 1.dp)
-            Spacer(modifier = Modifier.height(12.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(text = "Tổng tiền / Tiền cọc giữ bàn", fontSize = 11.sp, color = Color.Gray)
-                    Spacer(modifier = Modifier.height(2.dp))
+                // Badge trạng thái
+                Surface(color = statusColor.copy(alpha = 0.15f), shape = RoundedCornerShape(6.dp)) {
                     Text(
-                        text = currencyFormatter.format(booking.totalAmount),
-                        fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color(0xFF34C759)
+                        text = statusText,
+                        color = statusColor,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                     )
                 }
-                Icon(Icons.Default.KeyboardArrowRight, contentDescription = "Arrow Right", tint = Color.LightGray, modifier = Modifier.size(20.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(text = "${booking.totalAmount.toLong()} VND", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+
+                    // Nút nhỏ chuyển trạng thái tiếp theo
+                    if (nextAction != null) {
+                        val (nextStatus, nextLabel) = nextAction
+                        val btnColor = when (nextStatus) {
+                            "checked_in" -> Color(0xFF007AFF)
+                            "payment" -> Color(0xFF34C759)
+                            else -> Color(0xFF636366)
+                        }
+                        Button(
+                            onClick = {
+                                if (nextStatus == "payment") {
+                                    // ĐÃ SỬA: Điều hướng sang màn hình thanh toán thay vì đổi trạng thái
+                                    onPayment()
+                                } else {
+                                    onStatusChange(nextStatus)
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = btnColor),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.height(30.dp)
+                        ) {
+                            Text(text = nextLabel, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        }
+                    }
+                }
             }
         }
-    }
-}
-
-@Composable
-fun StatusBadge(statusType: String) {
-    val (backgroundColor, textColor, textLabel) = when (statusType) {
-        "checked_in" -> Triple(Color(0xFFE4F9E7), Color(0xFF34C759), "Đang phục vụ")
-        "pending" -> Triple(Color(0xFFFFF1E6), Color(0xFFFF9500), "Chờ xếp bàn")
-        "cancelled" -> Triple(Color(0xFFFFE5E5), Color(0xFFFF3B30), "Đã hủy") // ĐÃ THÊM
-        else -> Triple(Color(0xFFE5F1FF), Color(0xFF007AFF), "Đã rời đi")
-    }
-    Surface(color = backgroundColor, shape = RoundedCornerShape(4.dp)) {
-        Text(
-            text = textLabel,
-            color = textColor,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-        )
     }
 }

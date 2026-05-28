@@ -7,7 +7,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.*
@@ -27,319 +29,666 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 
-// 0. ĐỊNH NGHĨA LỚP DỮ LIỆU THÔNG TIN BÀN ĂN
 data class TableData(
     val id: String,
-    val tableName: String,  // Tên bàn hiển thị (Ví dụ: BÀN 01)
-    val status: String      // Trạng thái bàn: "available" (Trống), "occupied" (Đang ăn)
+    val tableNumber: String,
+    val tableName: String,
+    val status: String,
+    val zone: String
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SoDoBanScreen(navController: NavController) {
+
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
-    // --- QUẢN LÝ DANH SÁCH BÀN ĂN BẰNG MUTABLESTATELISTOF ĐỂ CẬP NHẬT GIAO DIỆN TỨC THÌ ---
-    // ĐÃ SỬA: Không còn hardcode, dữ liệu được load động từ dbo.Tables qua API
-    val tableList = remember { mutableStateListOf<TableData>() }
+    val tableList = remember {
+        mutableStateListOf<TableData>()
+    }
 
-    // --- TRẠNG THÁI ĐỂ PHỤC VỤ HỘP THOẠI ĐỔI TRẠNG THÁI BÀN ---
-    var showDialog by remember { mutableStateOf(false) }
-    var selectedTableForEdit by remember { mutableStateOf<TableData?>(null) }
+    val scrollState = rememberScrollState()
 
-    // ĐÃ THÊM: Trạng thái loading để hiển thị vòng tròn chờ khi đang tải dữ liệu lần đầu
-    var isLoading by remember { mutableStateOf(true) }
+    var showDialog by remember {
+        mutableStateOf(false)
+    }
 
-    // Tính toán số lượng bàn tự động mỗi khi danh sách có sự thay đổi
-    val occupiedCount = tableList.count { it.status == "occupied" }
-    val totalTables = tableList.size
+    var selectedTableForEdit by remember {
+        mutableStateOf<TableData?>(null)
+    }
 
-    // =========================================================================
-    // ĐÃ THÊM: HÀM GỌI API LẤY DANH SÁCH BÀN TỪ dbo.Tables (GET /api/tables)
-    // Thay thế hoàn toàn dữ liệu hardcode cũ, đảm bảo đồng bộ với SQL Server
-    // =========================================================================
-    val fetchTables = suspend {
+    var isLoading by remember {
+        mutableStateOf(true)
+    }
+
+    val zoneATables =
+        tableList.filter { it.zone == "A" }
+
+    val zoneBTables =
+        tableList.filter { it.zone == "B" }
+
+    val occupiedCount =
+        tableList.count {
+            it.status == "occupied"
+        }
+
+    val bookedCount =
+        tableList.count {
+            it.status == "booked"
+        }
+
+    val totalTables =
+        tableList.size
+
+    // ====================================================
+    // FETCH TABLES
+    // ====================================================
+
+    suspend fun fetchTables() {
+
         withContext(Dispatchers.IO) {
+
             var conn: HttpURLConnection? = null
+
             try {
-                val url = URL("http://10.0.2.2:3000/api/tables")
-                conn = url.openConnection() as HttpURLConnection
+
+                val url =
+                    URL("http://10.0.2.2:3000/api/tables")
+
+                conn =
+                    url.openConnection()
+                            as HttpURLConnection
+
                 conn.requestMethod = "GET"
                 conn.connectTimeout = 5000
                 conn.readTimeout = 5000
 
-                if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-                    val responseStr = conn.inputStream.bufferedReader().use { it.readText() }
-                    val jsonArray = JSONObject(responseStr).getJSONArray("tables")
+                if (
+                    conn.responseCode ==
+                    HttpURLConnection.HTTP_OK
+                ) {
 
-                    val fetchedList = mutableListOf<TableData>()
+                    val responseStr =
+                        conn.inputStream
+                            .bufferedReader()
+                            .use { it.readText() }
+
+                    val jsonArray =
+                        JSONObject(responseStr)
+                            .getJSONArray("tables")
+
+                    val fetched =
+                        mutableListOf<TableData>()
+
                     for (i in 0 until jsonArray.length()) {
-                        val item = jsonArray.getJSONObject(i)
-                        fetchedList.add(
+
+                        val obj =
+                            jsonArray.getJSONObject(i)
+
+                        val tableNum =
+                            obj.optString(
+                                "tableNumber",
+                                ""
+                            )
+
+                        fetched.add(
+
                             TableData(
-                                id = item.getString("id"),
-                                // padStart(2, '0'): Đảm bảo số bàn luôn hiển thị 2 chữ số (1 → "01", 2 → "02")
-                                tableName = "BÀN ${item.getString("tableNumber").padStart(2, '0')}",
-                                status = item.getString("status")
+                                id = obj.optString("id"),
+
+                                tableNumber = tableNum,
+
+                                tableName = "BÀN $tableNum",
+
+                                status =
+                                    obj.optString(
+                                        "status",
+                                        "available"
+                                    ),
+
+                                zone =
+                                    obj.optString(
+                                        "zone",
+                                        if (
+                                            tableNum.startsWith("A")
+                                        )
+                                            "A"
+                                        else
+                                            "B"
+                                    )
                             )
                         )
                     }
+
                     withContext(Dispatchers.Main) {
+
                         tableList.clear()
-                        tableList.addAll(fetchedList)
+                        tableList.addAll(fetched)
+
                         isLoading = false
                     }
                 }
+
             } catch (e: Exception) {
+
                 e.printStackTrace()
+
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "Lỗi tải sơ đồ bàn: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+
                     isLoading = false
+
+                    Toast.makeText(
+                        context,
+                        "Lỗi tải sơ đồ bàn!",
+                        Toast.LENGTH_LONG
+                    ).show()
                 }
-            } finally {
+            }
+
+            finally {
+
                 conn?.disconnect()
             }
         }
     }
 
-    // =========================================================================
-    // ĐÃ THÊM: HÀM GỌI API CẬP NHẬT TRẠNG THÁI BÀN LÊN SQL SERVER (PUT /api/tables/status)
-    // Trước đây chỉ cập nhật trong RAM (mất khi tắt app), nay lưu thẳng vào database
-    // =========================================================================
-    val updateTableStatus = { tableId: String, newStatus: String, index: Int, updatedTable: TableData ->
+    // ====================================================
+    // UPDATE TABLE STATUS
+    // ====================================================
+
+    fun updateTableStatus(
+        tableId: String,
+        newStatus: String,
+        index: Int,
+        updatedTable: TableData
+    ) {
+
         coroutineScope.launch {
+
             withContext(Dispatchers.IO) {
+
                 var conn: HttpURLConnection? = null
+
                 try {
-                    val url = URL("http://10.0.2.2:3000/api/tables/status")
-                    conn = url.openConnection() as HttpURLConnection
+
+                    val url =
+                        URL("http://10.0.2.2:3000/api/tables/status")
+
+                    conn =
+                        url.openConnection()
+                                as HttpURLConnection
+
                     conn.requestMethod = "PUT"
-                    conn.setRequestProperty("Content-Type", "application/json; utf-8")
+
+                    conn.setRequestProperty(
+                        "Content-Type",
+                        "application/json; utf-8"
+                    )
+
                     conn.connectTimeout = 5000
                     conn.readTimeout = 5000
                     conn.doOutput = true
 
-                    val body = JSONObject().apply {
-                        put("id", tableId)
-                        put("status", newStatus)
-                    }.toString()
+                    val body =
+                        JSONObject().apply {
 
-                    conn.outputStream.use { os ->
-                        os.write(body.toByteArray(charset("utf-8")))
+                            put("id", tableId)
+
+                            put(
+                                "status",
+                                newStatus
+                            )
+
+                        }.toString()
+
+                    conn.outputStream.use {
+
+                        it.write(
+                            body.toByteArray(
+                                Charsets.UTF_8
+                            )
+                        )
                     }
 
-                    val responseCode = conn.responseCode
+                    val code =
+                        conn.responseCode
+
                     withContext(Dispatchers.Main) {
-                        if (responseCode == HttpURLConnection.HTTP_OK) {
-                            // Cập nhật UI ngay lập tức sau khi server xác nhận lưu thành công
-                            tableList[index] = updatedTable
-                            Toast.makeText(context, "Đã cập nhật ${updatedTable.tableName}!", Toast.LENGTH_SHORT).show()
-                        } else {
-                            Toast.makeText(context, "Lỗi cập nhật: mã $responseCode", Toast.LENGTH_SHORT).show()
+
+                        if (
+                            code ==
+                            HttpURLConnection.HTTP_OK
+                        ) {
+
+                            tableList[index] =
+                                updatedTable
+
+                            Toast.makeText(
+                                context,
+                                "Đã cập nhật bàn!",
+                                Toast.LENGTH_SHORT
+                            ).show()
                         }
                     }
+
                 } catch (e: Exception) {
+
                     e.printStackTrace()
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(context, "Lỗi kết nối: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
-                    }
-                } finally {
+                }
+
+                finally {
+
                     conn?.disconnect()
                 }
             }
         }
     }
 
-    // ĐÃ THÊM: Tự động tải danh sách bàn từ API khi mở màn hình (thay vì dùng hardcode)
     LaunchedEffect(Unit) {
         fetchTables()
     }
 
     Scaffold(
+
         topBar = {
-            // [COMP 1]: HEADER - Có nút quay lại và tiêu đề căn giữa
+
             TopAppBar(
+
                 title = {
+
                     Text(
-                        text = "Sơ đồ bàn ăn",
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.Black
+                        "Sơ đồ bàn ăn",
+                        fontWeight = FontWeight.Bold
                     )
                 },
+
                 navigationIcon = {
-                    IconButton(onClick = { navController.popBackStack() }) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Quay lại", tint = Color.Black)
+
+                    IconButton(
+                        onClick = {
+                            navController.popBackStack()
+                        }
+                    ) {
+
+                        Icon(
+                            Icons.Default.ArrowBack,
+                            contentDescription = null
+                        )
                     }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.White),
-                modifier = Modifier.background(Color.White)
+                }
             )
         }
+
     ) { innerPadding ->
 
         Column(
+
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
                 .background(Color(0xFFF8F9FA))
+                .verticalScroll(scrollState)
                 .padding(horizontal = 16.dp)
         ) {
+
             Spacer(modifier = Modifier.height(16.dp))
 
-            // [COMP 2]: ROOM INFO SECTOR - Trạng thái phòng và dòng chú thích màu sắc
             Text(
-                text = "Trạng thái phòng máy lạnh",
+                text = "Sơ đồ bàn ăn nhà hàng",
                 fontSize = 20.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color(0xFF212529)
+                fontWeight = FontWeight.Bold
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text =
+                    "Đang dùng: $occupiedCount | Đã đặt: $bookedCount | Tổng: $totalTables bàn",
+                fontSize = 13.sp,
+                color = Color.DarkGray
+            )
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            if (isLoading) {
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(300.dp),
+
+                    contentAlignment = Alignment.Center
+                ) {
+
+                    CircularProgressIndicator()
+                }
+            }
+
+            else {
+
+                // =========================
+                // KHU A
+                // =========================
+
+                Text(
+                    text =
+                        "Khu A (${zoneATables.size} bàn)",
+
+                    fontWeight = FontWeight.Bold,
+
+                    color = Color(0xFF1D4ED8)
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                val aRows =
+                    kotlin.math.ceil(
+                        zoneATables.size / 3.0
+                    ).toInt()
+
+                val aHeight =
+                    (aRows * 110).dp
+
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(3),
+
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(aHeight),
+
+                    userScrollEnabled = false,
+
+                    horizontalArrangement =
+                        Arrangement.spacedBy(10.dp),
+
+                    verticalArrangement =
+                        Arrangement.spacedBy(10.dp)
+                ) {
+
+                    items(zoneATables) { table ->
+
+                        TableCard(
+                            table = table,
+                            onClick = {
+
+                                selectedTableForEdit =
+                                    table
+
+                                showDialog = true
+                            }
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                // =========================
+                // KHU B
+                // =========================
+
+                Text(
+                    text =
+                        "Khu B (${zoneBTables.size} bàn)",
+
+                    fontWeight = FontWeight.Bold,
+
+                    color = Color(0xFF15803D)
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                val bRows =
+                    kotlin.math.ceil(
+                        zoneBTables.size / 3.0
+                    ).toInt()
+
+                val bHeight =
+                    (bRows * 110).dp
+
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(3),
+
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(bHeight),
+
+                    userScrollEnabled = false,
+
+                    horizontalArrangement =
+                        Arrangement.spacedBy(10.dp),
+
+                    verticalArrangement =
+                        Arrangement.spacedBy(10.dp)
+                ) {
+
+                    items(zoneBTables) { table ->
+
+                        TableCard(
+                            table = table,
+                            onClick = {
+
+                                selectedTableForEdit =
+                                    table
+
+                                showDialog = true
+                            }
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(80.dp))
+            }
+        }
+    }
+
+    // ====================================================
+    // DIALOG
+    // ====================================================
+
+    if (
+        showDialog &&
+        selectedTableForEdit != null
+    ) {
+
+        val currentTable =
+            selectedTableForEdit!!
+
+        val isAvailable =
+            currentTable.status == "available"
+
+        val nextStatus =
+            if (isAvailable)
+                "occupied"
+            else
+                "available"
+
+        val nextLabel =
+            if (isAvailable)
+                "Đang dùng"
+            else
+                "Trống"
+
+        AlertDialog(
+
+            onDismissRequest = {
+                showDialog = false
+            },
+
+            title = {
+
+                Text(
+                    "Đổi trạng thái ${currentTable.tableName}"
+                )
+            },
+
+            text = {
+
+                Text(
+                    "Chuyển sang [$nextLabel]?"
+                )
+            },
+
+            confirmButton = {
+
+                TextButton(
+
+                    onClick = {
+
+                        val index =
+                            tableList.indexOfFirst {
+                                it.id == currentTable.id
+                            }
+
+                        if (index != -1) {
+
+                            val updated =
+                                currentTable.copy(
+                                    status = nextStatus
+                                )
+
+                            updateTableStatus(
+                                currentTable.id,
+                                nextStatus,
+                                index,
+                                updated
+                            )
+                        }
+
+                        showDialog = false
+                    }
+                ) {
+
+                    Text("Cập nhật")
+                }
+            },
+
+            dismissButton = {
+
+                TextButton(
+                    onClick = {
+                        showDialog = false
+                    }
+                ) {
+
+                    Text("Hủy")
+                }
+            }
+        )
+    }
+}
+
+@Composable
+fun TableCard(
+    table: TableData,
+    onClick: () -> Unit
+) {
+
+    val isBooked =
+        table.status == "booked"
+
+    val bgColor =
+        when {
+
+            table.status == "occupied" ->
+                Color(0xFFD9E1F2)
+
+            isBooked ->
+                Color(0xFFFFF3CD)
+
+            else ->
+                Color(0xFFE2F0D9)
+        }
+
+    val textColor =
+        when {
+
+            table.status == "occupied" ->
+                Color(0xFF1F4E79)
+
+            isBooked ->
+                Color(0xFF856404)
+
+            else ->
+                Color(0xFF385723)
+        }
+
+    val statusLabel =
+        when {
+
+            table.status == "occupied" ->
+                "Đang dùng"
+
+            isBooked ->
+                "Đã đặt"
+
+            else ->
+                "Trống"
+        }
+
+    Box(
+
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(100.dp)
+            .background(
+                bgColor,
+                RoundedCornerShape(10.dp)
+            )
+            .clickable {
+                onClick()
+            }
+    ) {
+
+        Column(
+
+            modifier = Modifier.fillMaxSize(),
+
+            verticalArrangement =
+                Arrangement.Center,
+
+            horizontalAlignment =
+                Alignment.CenterHorizontally
+        ) {
+
+            Text(
+                text = table.tableName,
+                fontWeight = FontWeight.Bold
             )
 
             Spacer(modifier = Modifier.height(4.dp))
 
             Text(
-                text = "Xanh lá: Bàn trống | Xanh dương: Đang có khách",
-                fontSize = 13.sp,
-                color = Color.Gray
+                text = statusLabel,
+                color = textColor,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold
             )
+        }
 
-            // Thanh tiến độ hiển thị trực quan tỷ lệ lấp đầy bàn ăn (Tự động chạy lại khi đổi trạng thái bàn)
-            Spacer(modifier = Modifier.height(12.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+        if (isBooked) {
+
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(4.dp)
+                    .background(
+                        Color(0xFFFF9500),
+                        RoundedCornerShape(4.dp)
+                    )
+                    .padding(
+                        horizontal = 4.dp,
+                        vertical = 2.dp
+                    )
             ) {
+
                 Text(
-                    text = "Hiệu suất sử dụng: $occupiedCount / $totalTables bàn đang ăn",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = Color.DarkGray
+                    text = "Đã đặt",
+                    color = Color.White,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold
                 )
-            }
-            Spacer(modifier = Modifier.height(6.dp))
-            // ĐÃ THÊM: Kiểm tra totalTables > 0 tránh lỗi chia cho 0 khi chưa load xong dữ liệu
-            if (totalTables > 0) {
-                LinearProgressIndicator(
-                    progress = { occupiedCount.toFloat() / totalTables.toFloat() },
-                    modifier = Modifier.fillMaxWidth().height(6.dp),
-                    color = Color(0xFF007AFF),
-                    trackColor = Color(0xFFE5E5EA),
-                    strokeCap = androidx.compose.ui.graphics.StrokeCap.Round
-                )
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // [COMP 3]: GRID LIST TABLES - Hiển thị danh sách bàn dạng lưới 2 cột
-            // ĐÃ THÊM: Hiển thị vòng tròn loading khi đang tải dữ liệu lần đầu từ API
-            if (isLoading) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = Color(0xFF007AFF))
-                }
-            } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(2),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                    modifier = Modifier.fillMaxSize()
-                ) {
-                    items(tableList) { table ->
-                        val isAvailable = table.status == "available"
-                        val cardBackgroundColor = if (isAvailable) Color(0xFFE2F0D9) else Color(0xFFD9E1F2)
-                        val statusTextColor = if (isAvailable) Color(0xFF385723) else Color(0xFF1F4E79)
-                        val statusTextLabel = if (isAvailable) "Trống" else "Đang ăn"
-
-                        Surface(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(100.dp)
-                                .clickable {
-                                    // ĐÃ THÊM: Lưu lại thông tin bàn được click và mở Dialog chỉnh sửa
-                                    selectedTableForEdit = table
-                                    showDialog = true
-                                },
-                            color = cardBackgroundColor,
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Column(
-                                modifier = Modifier.fillMaxSize(),
-                                verticalArrangement = Arrangement.Center,
-                                horizontalAlignment = Alignment.CenterHorizontally
-                            ) {
-                                Text(
-                                    text = table.tableName,
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color.Black
-                                )
-
-                                Spacer(modifier = Modifier.height(6.dp))
-
-                                Text(
-                                    text = statusTextLabel,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = statusTextColor
-                                )
-                            }
-                        }
-                    }
-                }
             }
         }
-    }
-
-    // =========================================================================
-    // --- CHỨC NĂNG CHỈNH SỬA TRẠNG THÁI BÀN ĂN (DIALOG XÁC NHẬN) ---
-    // =========================================================================
-    if (showDialog && selectedTableForEdit != null) {
-        val currentTable = selectedTableForEdit!!
-        val isCurrentAvailable = currentTable.status == "available"
-
-        // Chuẩn bị văn bản linh hoạt theo trạng thái hiện tại của bàn
-        val nextStatusLabel = if (isCurrentAvailable) "Đang ăn" else "Trống"
-        val nextStatusValue = if (isCurrentAvailable) "occupied" else "available"
-
-        AlertDialog(
-            onDismissRequest = { showDialog = false },
-            title = {
-                Text(
-                    text = "Thay đổi trạng thái ${currentTable.tableName}",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 16.sp
-                )
-            },
-            text = {
-                Text(
-                    text = "Bạn có muốn chuyển trạng thái bàn từ [${if (isCurrentAvailable) "Trống" else "Đang ăn"}] sang [$nextStatusLabel] không?",
-                    fontSize = 14.sp
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        // Tìm vị trí của bàn ăn trong List và chuẩn bị bản ghi mới
-                        val index = tableList.indexOfFirst { it.id == currentTable.id }
-                        if (index != -1) {
-                            val updatedTable = currentTable.copy(status = nextStatusValue)
-                            // ĐÃ SỬA: Gọi API lưu vào SQL Server thay vì chỉ cập nhật RAM
-                            updateTableStatus(currentTable.id, nextStatusValue, index, updatedTable)
-                        }
-                        showDialog = false // Đóng hộp thoại
-                    }
-                ) {
-                    Text(text = "Cập nhật", color = Color(0xFF007AFF), fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDialog = false }) {
-                    Text(text = "Hủy bỏ", color = Color.Gray)
-                }
-            },
-            containerColor = Color.White,
-            shape = RoundedCornerShape(14.dp)
-        )
     }
 }
