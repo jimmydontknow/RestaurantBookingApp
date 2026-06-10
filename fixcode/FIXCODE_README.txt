@@ -1,6 +1,6 @@
 RESTAURANT BOOKING BACKEND RECOVERY
 
-All Codex support files are stored in this fixbycodex directory.
+All Codex support files are stored in this fixcode directory.
 The Android project remains in the parent directory.
 
 FIRST SETUP ON A NEW COMPUTER
@@ -28,7 +28,7 @@ FILES
 - check-backend.ps1: checks API and SQL Server health.
 - logs: local operational logs.
 
-The scripts determine the project path from the fixbycodex directory, so the
+The scripts determine the project path from the fixcode directory, so the
 project can be moved or shared without editing absolute paths.
 
 Do not copy C:\Users\asus\.codex into the project. It contains Codex

@@ -19,6 +19,6 @@ node_modules/
 
 # Generated archives, screenshots, logs, and one-off patch helpers
 *.zip
-fixbycodex/logs/
-fixbycodex/work/
-fixbycodex/*.png
+fixcode/logs/
+fixcode/work/
+fixcode/*.png
