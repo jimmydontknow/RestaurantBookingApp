@@ -10,6 +10,7 @@ import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -51,6 +52,9 @@ fun RootNavigation() {
         }
         composable("customer_main") {
             CustomerMainScreen(rootNavController = navController)
+        }
+        composable("employee_main") {
+            EmployeeMainScreen(rootNavController = navController)
         }
     }
 }
@@ -124,7 +128,7 @@ fun AdminMainScreen(rootNavController: NavController) {
             modifier = Modifier.padding(innerPadding)
         ) {
             composable("dashboard") { DashboardScreen(navController = navController) }
-            composable("LeTan") { BookingsListScreen(navController = navController) }
+            composable("LeTan") { BookingsListScreen(navController = navController, canManageBookings = true, canOrderFood = true) }
             composable("sodo") { SoDoBanScreen(navController = navController) }
             composable("invoices") { InvoiceListScreen(navController = navController) }
             composable("them") { ThemScreen(navController = navController) }
@@ -138,6 +142,85 @@ fun AdminMainScreen(rootNavController: NavController) {
             composable("Payment/{bookingId}") { backStackEntry ->
                 val bookingId = backStackEntry.arguments?.getString("bookingId") ?: ""
                 PaymentScreen(navController = navController, bookingId = bookingId)
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun EmployeeMainScreen(rootNavController: NavController) {
+    val navController = rememberNavController()
+    val navBackStackEntry by navController.currentBackStackEntryAsState()
+    val currentRoute = navBackStackEntry?.destination?.route
+    val showBottomBar = currentRoute in listOf(
+        "employee_bookings",
+        "employee_tables",
+        "employee_invoices",
+        "employee_lookup"
+    )
+
+    Scaffold(
+        bottomBar = {
+            if (showBottomBar) {
+                NavigationBar {
+                    NavigationBarItem(
+                        selected = currentRoute == "employee_bookings",
+                        onClick = { navController.navigate("employee_bookings") },
+                        label = { Text("Đơn") },
+                        icon = { Icon(Icons.Default.DateRange, contentDescription = null) }
+                    )
+                    NavigationBarItem(
+                        selected = currentRoute == "employee_tables",
+                        onClick = { navController.navigate("employee_tables") },
+                        label = { Text("Sơ đồ") },
+                        icon = { Icon(Icons.Default.ShoppingCart, contentDescription = null) }
+                    )
+                    NavigationBarItem(
+                        selected = currentRoute == "employee_invoices",
+                        onClick = { navController.navigate("employee_invoices") },
+                        label = { Text("Hóa đơn") },
+                        icon = { Icon(Icons.Default.CreditCard, contentDescription = null) }
+                    )
+                    NavigationBarItem(
+                        selected = currentRoute == "employee_lookup",
+                        onClick = { navController.navigate("employee_lookup") },
+                        label = { Text("Tra khách") },
+                        icon = { Icon(Icons.Default.Search, contentDescription = null) }
+                    )
+                }
+            }
+        }
+    ) { innerPadding ->
+        NavHost(
+            navController = navController,
+            startDestination = "employee_bookings",
+            modifier = Modifier.padding(innerPadding)
+        ) {
+            composable("employee_bookings") {
+                BookingsListScreen(
+                    navController = navController,
+                    canManageBookings = false,
+                    canOrderFood = true
+                )
+            }
+            composable("employee_tables") { SoDoBanScreen(navController) }
+            composable("employee_invoices") { InvoiceListScreen(navController) }
+            composable("employee_lookup") { StaffCustomerLookupScreen() }
+            composable("Payment/{bookingId}") { backStackEntry ->
+                PaymentScreen(
+                    navController,
+                    backStackEntry.arguments?.getString("bookingId") ?: ""
+                )
+            }
+            composable("menu/{bookingId}") { backStackEntry ->
+                val bookingId = backStackEntry.arguments
+                    ?.getString("bookingId")
+                    ?.toIntOrNull()
+                    ?: 0
+                if (bookingId > 0) {
+                    CustomerMenuScreen(navController, bookingId)
+                }
             }
         }
     }

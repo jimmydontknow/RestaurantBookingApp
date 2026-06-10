@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -62,11 +63,14 @@ fun SoDoBanScreen(navController: NavController) {
         mutableStateOf(true)
     }
 
+    fun tableOrder(table: TableData): Int =
+        table.tableNumber.drop(1).toIntOrNull() ?: Int.MAX_VALUE
+
     val zoneATables =
-        tableList.filter { it.zone == "A" }
+        tableList.filter { it.zone == "A" }.sortedBy(::tableOrder)
 
     val zoneBTables =
-        tableList.filter { it.zone == "B" }
+        tableList.filter { it.zone == "B" }.sortedBy(::tableOrder)
 
     val occupiedCount =
         tableList.count {
@@ -94,7 +98,7 @@ fun SoDoBanScreen(navController: NavController) {
             try {
 
                 val url =
-                    URL("http://10.0.2.2:3000/api/tables")
+                    URL("http://10.0.2.2:3001/api/tables")
 
                 conn =
                     url.openConnection()
@@ -129,23 +133,31 @@ fun SoDoBanScreen(navController: NavController) {
                         val tableNum =
                             obj.optString(
                                 "tableNumber",
-                                ""
+                                obj.optString("TableNumber", "")
                             )
+
+                        val rawStatus =
+                            obj.optString(
+                                "status",
+                                obj.optString("CurrentStatus", "available")
+                            )
+
+                        val normalizedStatus = when {
+                            rawStatus.equals("occupied", true) || rawStatus.equals("Đang dùng", true) -> "occupied"
+                            rawStatus.equals("booked", true) || rawStatus.equals("Đã đặt", true) -> "booked"
+                            else -> "available"
+                        }
 
                         fetched.add(
 
                             TableData(
-                                id = obj.optString("id"),
+                                id = obj.optString("id", obj.optString("TableID", "")),
 
                                 tableNumber = tableNum,
 
                                 tableName = "BÀN $tableNum",
 
-                                status =
-                                    obj.optString(
-                                        "status",
-                                        "available"
-                                    ),
+                                status = normalizedStatus,
 
                                 zone =
                                     obj.optString(
@@ -213,7 +225,7 @@ fun SoDoBanScreen(navController: NavController) {
                 try {
 
                     val url =
-                        URL("http://10.0.2.2:3000/api/tables/status")
+                        URL("http://10.0.2.2:3001/api/tables/status")
 
                     conn =
                         url.openConnection()
@@ -286,7 +298,10 @@ fun SoDoBanScreen(navController: NavController) {
     }
 
     LaunchedEffect(Unit) {
-        fetchTables()
+        while (true) {
+            fetchTables()
+            delay(5000)
+        }
     }
 
     Scaffold(

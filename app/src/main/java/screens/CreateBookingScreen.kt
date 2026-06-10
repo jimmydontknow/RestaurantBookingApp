@@ -43,7 +43,7 @@ fun CreateBookingScreen(navController: NavController) {
     // --- TRẠNG THÁI NHẬP LIỆU ---
     var guestName by remember { mutableStateOf("") }
     var phoneNumber by remember { mutableStateOf("") }
-    var depositAmount by remember { mutableStateOf("") }
+    var depositAmount by remember { mutableStateOf("200000") }
     var note by remember { mutableStateOf("") }
 
     // --- TRẠNG THÁI CHỌN KHU ---
@@ -89,7 +89,7 @@ fun CreateBookingScreen(navController: NavController) {
         withContext(Dispatchers.IO) {
             var conn: HttpURLConnection? = null
             try {
-                val url = URL("http://10.0.2.2:3000/api/tables")
+                val url = URL("http://10.0.2.2:3001/api/tables")
                 conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"
                 conn.connectTimeout = 5000
@@ -101,13 +101,21 @@ fun CreateBookingScreen(navController: NavController) {
                     val fetched = mutableListOf<TableData>()
                     for (i in 0 until jsonArray.length()) {
                         val item = jsonArray.getJSONObject(i)
+                        val tableNumber = item.optString("tableNumber", item.optString("TableNumber", ""))
+                        val rawStatus = item.optString("status", item.optString("CurrentStatus", "available"))
+                        val normalizedStatus = when {
+                            rawStatus.equals("occupied", true) || rawStatus.equals("Đang dùng", true) -> "occupied"
+                            rawStatus.equals("booked", true) || rawStatus.equals("Đã đặt", true) -> "booked"
+                            else -> "available"
+                        }
+
                         fetched.add(
                             TableData(
-                                id = item.getString("id"),
-                                tableNumber = item.optString("tableNumber", ""),
-                                tableName = "BÀN ${item.optString("tableNumber", "")}",
-                                status = item.getString("status"),
-                                zone = item.optString("zone", "A"),
+                                id = item.optString("id", item.optString("TableID", "")),
+                                tableNumber = tableNumber,
+                                tableName = "BÀN $tableNumber",
+                                status = normalizedStatus,
+                                zone = item.optString("zone", if (tableNumber.startsWith("A")) "A" else "B"),
                             )
                         )
                     }
@@ -134,7 +142,7 @@ fun CreateBookingScreen(navController: NavController) {
             tableIds.forEach { tableId ->
                 var conn: HttpURLConnection? = null
                 try {
-                    val url = URL("http://10.0.2.2:3000/api/tables/status")
+                    val url = URL("http://10.0.2.2:3001/api/tables/status")
                     conn = url.openConnection() as HttpURLConnection
                     conn.requestMethod = "PUT"
                     conn.setRequestProperty("Content-Type", "application/json; utf-8")
@@ -191,7 +199,7 @@ fun CreateBookingScreen(navController: NavController) {
         return withContext(Dispatchers.IO) {
             var conn: HttpURLConnection? = null
             try {
-                val url = URL("http://10.0.2.2:3000/api/bookings")
+                val url = URL("http://10.0.2.2:3001/api/bookings")
                 conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "POST"
                 conn.setRequestProperty("Content-Type", "application/json; utf-8")
@@ -537,9 +545,10 @@ fun CreateBookingScreen(navController: NavController) {
             // 5. Tiền cọc
             OutlinedTextField(
                 value = depositAmount,
-                onValueChange = { depositAmount = it },
-                label = { Text("Số tiền đặt cọc (VND)") },
-                placeholder = { Text("Ví dụ: 500000") },
+                onValueChange = {},
+                readOnly = true,
+                label = { Text("Tiền đặt cọc cố định (VND)") },
+                supportingText = { Text("Tiền cọc sẽ được trừ khi thanh toán hóa đơn.") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(8.dp),

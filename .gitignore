@@ -1,15 +1,24 @@
 *.iml
-.gradle
-/local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
-.DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
+.gradle/
 local.properties
+.idea/
+**/.idea/
+.vs/
+**/build/
+captures/
+.externalNativeBuild/
+.cxx/
+.DS_Store
+
+# Node dependencies and local configuration
+node_modules/
+**/node_modules/
+.env
+**/.env
+!**/.env.example
+
+# Generated archives, screenshots, logs, and one-off patch helpers
+*.zip
+fixbycodex/logs/
+fixbycodex/work/
+fixbycodex/*.png

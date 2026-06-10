@@ -11,5 +11,6 @@ data class BookingItem(
 
     // THÊM NGÀY + GIỜ ĐẶT
     val bookingDate: String = "",
-    val bookingTime: String = ""
+    val bookingTime: String = "",
+    val hasInvoice: Boolean = false
 )

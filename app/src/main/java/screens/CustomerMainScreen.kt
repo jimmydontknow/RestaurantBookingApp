@@ -30,6 +30,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -85,15 +86,37 @@ fun CustomerMainScreen(rootNavController: NavController) {
             }
 
             composable("customer_orders") {
-                CustomerOrdersScreen()
+                CustomerOrdersScreen(navController)
             }
 
             composable("customer_tables") {
                 CustomerTableViewScreen()
             }
+
+            composable("menu/{bookingId}") { backStackEntry ->
+                val bookingId = backStackEntry.arguments
+                    ?.getString("bookingId")
+                    ?.toIntOrNull()
+                    ?: 0
+                if (bookingId > 0) {
+                    CustomerMenuScreen(navController, bookingId)
+                } else {
+                    LaunchedEffect(Unit) {
+                        navController.popBackStack()
+                    }
+                }
+            }
         }
     }
 }
+
+
+data class CustomerMenuFood(
+    val foodId: Int,
+    val foodName: String,
+    val category: String,
+    val price: Double
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -103,429 +126,365 @@ fun CustomerBookingScreen(
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
-
     val prefs = context.getSharedPreferences("APP_USERS", android.content.Context.MODE_PRIVATE)
-    val loggedInName = prefs.getString("current_fullName", "") ?: ""
-    val loggedInPhone = prefs.getString("current_phoneNumber", "") ?: ""
+    val savedName = prefs.getString("current_fullName", "") ?: ""
+    val savedPhone = prefs.getString("current_phoneNumber", "") ?: ""
     val loggedInUsername = prefs.getString("current_username", "") ?: ""
 
-    var guestName by remember {
-        mutableStateOf(loggedInName)
-    }
-
-    var phoneNumber by remember {
-        mutableStateOf(loggedInPhone)
-    }
+    var isWalkIn by remember { mutableStateOf(savedName.isBlank() && savedPhone.isBlank()) }
+    var guestName by remember { mutableStateOf(savedName) }
+    var phoneNumber by remember { mutableStateOf(savedPhone) }
+    var memberText by remember { mutableStateOf("Nhập SĐT để kiểm tra khách cũ") }
+    var discountPercent by remember { mutableStateOf(0.0) }
     var guestCount by remember { mutableStateOf("") }
     var selectedZone by remember { mutableStateOf("A") }
     var bookingDate by remember { mutableStateOf("") }
     var bookingTime by remember { mutableStateOf("") }
     var note by remember { mutableStateOf("") }
-    var depositAmount by remember { mutableStateOf("500000") }
-    var isLoading by remember { mutableStateOf(false) }
-    var expandedZone by remember { mutableStateOf(false) }
+    var depositAmount by remember { mutableStateOf("200000") }
     var expandedTime by remember { mutableStateOf(false) }
+    var expandedZone by remember { mutableStateOf(false) }
+    var isLoading by remember { mutableStateOf(false) }
+    var isLoadingTables by remember { mutableStateOf(true) }
+    var isLoadingMenu by remember { mutableStateOf(true) }
 
-    val timeSlots = listOf(
-        "10:00", "10:30", "11:00", "11:30", "12:00", "12:30",
-        "13:00", "13:30", "17:00", "17:30", "18:00", "18:30",
-        "19:00", "19:30", "20:00", "20:30", "21:00"
-    )
+    val allTables = remember { mutableStateListOf<TableData>() }
+    val selectedTables = remember { mutableStateListOf<TableData>() }
+    val foods = remember { mutableStateListOf<CustomerMenuFood>() }
+    val quantities = remember { mutableStateMapOf<Int, Int>() }
+    val currencyFormatter = NumberFormat.getCurrencyInstance(Locale("vi", "VN"))
+    val timeSlots = listOf("10:00", "10:30", "11:00", "11:30", "12:00", "12:30", "13:00", "13:30", "17:00", "17:30", "18:00", "18:30", "19:00", "19:30", "20:00", "20:30", "21:00")
 
     val guestCountInt = guestCount.toIntOrNull() ?: 0
     val maxPerTable = if (selectedZone == "A") 10 else 20
-    val tablesNeeded =
-        if (guestCountInt > 0) kotlin.math.ceil(guestCountInt.toDouble() / maxPerTable).toInt()
-        else 0
-
+    val tablesNeeded = if (guestCountInt > 0) kotlin.math.ceil(guestCountInt.toDouble() / maxPerTable).toInt() else 0
+    val isOverLimit = tablesNeeded > 3
+    val zoneTables = allTables.filter { it.zone == selectedZone }
+    val selectedFoodCount = quantities.values.sum()
+    val menuTotal = foods.sumOf { it.price * (quantities[it.foodId] ?: 0) }
+    val discountAmount = menuTotal * discountPercent / 100.0
     val tableSummary = when {
-        tablesNeeded == 0 -> ""
-        tablesNeeded == 1 -> "1 Bàn đơn Khu $selectedZone"
-        tablesNeeded <= 3 -> "Gộp $tablesNeeded bàn Khu $selectedZone"
-        else -> "VƯỢT GIỚI HẠN"
+        selectedTables.isEmpty() -> "Chưa chọn bàn"
+        selectedTables.size == 1 -> "1 Bàn đơn ${selectedTables.first().tableNumber} Khu $selectedZone"
+        else -> "Gộp ${selectedTables.size} bàn ${selectedTables.joinToString("+") { it.tableNumber }} Khu $selectedZone"
     }
 
-    val isOverLimit = tablesNeeded > 3
+    suspend fun lookupMember() = withContext(Dispatchers.IO) {
+        if (phoneNumber.isBlank()) return@withContext
+        var conn: HttpURLConnection? = null
+        try {
+            conn = URL("http://10.0.2.2:3001/api/customers/lookup?phone=$phoneNumber").openConnection() as HttpURLConnection
+            conn.requestMethod = "GET"
+            conn.connectTimeout = 5000
+            conn.readTimeout = 5000
+            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                val obj = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
+                val found = obj.optBoolean("found", false)
+                discountPercent = obj.optDouble("discountPercent", 0.0)
+                val visits = obj.optInt("visitCount", 0)
+                val spent = obj.optDouble("totalSpent", 0.0)
+                withContext(Dispatchers.Main) {
+                    memberText = if (found) "Khách cũ: $visits lần • đã chi ${currencyFormatter.format(spent)} • giảm ${discountPercent.toInt()}%" else "SĐT chưa có lịch sử, đặt nhanh như khách vãng lai"
+                }
+            }
+        } catch (_: Exception) {
+            withContext(Dispatchers.Main) { memberText = "Chưa kiểm tra được SĐT" }
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    suspend fun loadTables() = withContext(Dispatchers.IO) {
+        var conn: HttpURLConnection? = null
+        try {
+            conn = URL("http://10.0.2.2:3001/api/tables").openConnection() as HttpURLConnection
+            conn.requestMethod = "GET"
+            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                val arr = JSONObject(conn.inputStream.bufferedReader().use { it.readText() }).getJSONArray("tables")
+                val fetched = mutableListOf<TableData>()
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    val number = obj.optString("tableNumber", obj.optString("TableNumber", ""))
+                    val rawStatus = obj.optString("status", obj.optString("CurrentStatus", "available"))
+                    val status = when {
+                        rawStatus.equals("occupied", true) || rawStatus.equals("Đang dùng", true) -> "occupied"
+                        rawStatus.equals("booked", true) || rawStatus.equals("Đã đặt", true) -> "booked"
+                        else -> "available"
+                    }
+                    fetched.add(TableData(obj.optString("id", obj.optString("TableID", "")), number, "BÀN $number", status, obj.optString("zone", if (number.startsWith("A")) "A" else "B")))
+                }
+                withContext(Dispatchers.Main) {
+                    allTables.clear()
+                    allTables.addAll(fetched)
+                    isLoadingTables = false
+                }
+            } else withContext(Dispatchers.Main) { isLoadingTables = false }
+        } catch (_: Exception) {
+            withContext(Dispatchers.Main) {
+                isLoadingTables = false
+            }
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    suspend fun loadMenu() = withContext(Dispatchers.IO) {
+        var conn: HttpURLConnection? = null
+        try {
+            conn = URL("http://10.0.2.2:3001/api/menu").openConnection() as HttpURLConnection
+            conn.requestMethod = "GET"
+            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                val arr = JSONObject(conn.inputStream.bufferedReader().use { it.readText() }).getJSONArray("items")
+                val fetched = mutableListOf<CustomerMenuFood>()
+                for (i in 0 until arr.length()) {
+                    val item = arr.getJSONObject(i)
+                    fetched.add(CustomerMenuFood(item.optInt("foodId", item.optInt("FoodID")), item.optString("foodName", item.optString("FoodName", "")), item.optString("category", item.optString("Category", "")), item.optDouble("price", item.optDouble("Price", 0.0))))
+                }
+                withContext(Dispatchers.Main) {
+                    foods.clear()
+                    foods.addAll(fetched)
+                    isLoadingMenu = false
+                }
+            } else withContext(Dispatchers.Main) { isLoadingMenu = false }
+        } catch (_: Exception) {
+            withContext(Dispatchers.Main) {
+                isLoadingMenu = false
+            }
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    suspend fun markTablesBooked() = withContext(Dispatchers.IO) {
+        selectedTables.forEach { table ->
+            var conn: HttpURLConnection? = null
+            try {
+                conn = URL("http://10.0.2.2:3001/api/tables/status").openConnection() as HttpURLConnection
+                conn.requestMethod = "PUT"
+                conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                conn.doOutput = true
+                val body = JSONObject().apply {
+                    put("id", table.id.toIntOrNull() ?: table.id)
+                    put("status", "booked")
+                }.toString()
+                conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                conn.responseCode
+            } finally {
+                conn?.disconnect()
+            }
+        }
+    }
+
+    suspend fun submitFoods(bookingId: Int) = withContext(Dispatchers.IO) {
+        foods.filter { (quantities[it.foodId] ?: 0) > 0 }.forEach { food ->
+            var conn: HttpURLConnection? = null
+            try {
+                conn = URL("http://10.0.2.2:3001/api/order-items/add").openConnection() as HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                conn.doOutput = true
+                val body = JSONObject().apply {
+                    put("bookingId", bookingId)
+                    put("foodId", food.foodId)
+                    put("quantity", quantities[food.foodId] ?: 0)
+                    put("unitPrice", food.price)
+                }.toString()
+                conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                conn.responseCode
+            } finally {
+                conn?.disconnect()
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        loadTables()
+        loadMenu()
+        if (phoneNumber.isNotBlank()) lookupMember()
+    }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Đặt bàn", fontWeight = FontWeight.Bold) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Quay lại")
-                    }
-                },
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, contentDescription = "Quay lại") } },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.White)
             )
         }
     ) { innerPadding ->
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .background(Color(0xFFF8F9FA))
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
+        LazyColumn(modifier = Modifier.fillMaxSize().padding(innerPadding).background(Color(0xFFF8F9FA)).padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             item {
                 Text("Thông tin đặt bàn", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                Text("Vui lòng điền đầy đủ thông tin", fontSize = 13.sp, color = Color.Gray)
+                Text("Khách vãng lai có thể đặt nhanh bằng tên và SĐT", fontSize = 13.sp, color = Color.Gray)
             }
-
             item {
-                OutlinedTextField(
-                    value = loggedInName,
-                    onValueChange = {},
-                    readOnly = true,
-                    label = { Text("Họ và tên") },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp)
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = isWalkIn, onCheckedChange = { isWalkIn = it })
+                    Text("Khách vãng lai / tiện đường")
+                }
             }
-
+            item { OutlinedTextField(value = guestName, onValueChange = { guestName = it }, readOnly = !isWalkIn && savedName.isNotBlank(), label = { Text("Họ và tên") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) }
             item {
-                OutlinedTextField(
-                    value = loggedInPhone,
-                    onValueChange = {},
-                    readOnly = true,
-                    label = { Text("Số điện thoại") },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp)
-                )
+                OutlinedTextField(value = phoneNumber, onValueChange = { phoneNumber = it.filter { c -> c.isDigit() } }, readOnly = !isWalkIn && savedPhone.isNotBlank(), label = { Text("Số điện thoại") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp), trailingIcon = {
+                    TextButton(onClick = { coroutineScope.launch { lookupMember() } }) { Text("Tìm") }
+                })
+                Text(memberText, fontSize = 12.sp, color = if (discountPercent > 0) Color(0xFF34C759) else Color.Gray)
             }
-
-            item {
-                OutlinedTextField(
-                    value = bookingDate,
-                    onValueChange = { bookingDate = it },
-                    label = { Text("Ngày đặt (YYYY-MM-DD)") },
-                    placeholder = { Text("VD: 2025-12-31") },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        unfocusedContainerColor = Color.White,
-                        focusedContainerColor = Color.White
-                    )
-                )
-            }
-
+            item { OutlinedTextField(value = bookingDate, onValueChange = { bookingDate = it }, label = { Text("Ngày đặt (YYYY-MM-DD)") }, placeholder = { Text("VD: 2026-06-06") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) }
             item {
                 Box(modifier = Modifier.fillMaxWidth()) {
-                    OutlinedTextField(
-                        value = bookingTime,
-                        onValueChange = {},
-                        readOnly = true,
-                        label = { Text("Giờ đặt bàn") },
-                        trailingIcon = {
-                            Icon(
-                                Icons.Default.ArrowDropDown,
-                                contentDescription = null,
-                                modifier = Modifier.clickable { expandedTime = true }
-                            )
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(8.dp),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            unfocusedContainerColor = Color.White,
-                            focusedContainerColor = Color.White
-                        )
-                    )
-
-                    DropdownMenu(
-                        expanded = expandedTime,
-                        onDismissRequest = { expandedTime = false }
-                    ) {
-                        timeSlots.forEach { time ->
-                            DropdownMenuItem(
-                                text = { Text(time) },
-                                onClick = {
-                                    bookingTime = time
-                                    expandedTime = false
-                                }
-                            )
+                    OutlinedTextField(value = bookingTime, onValueChange = {}, readOnly = true, label = { Text("Giờ đặt bàn") }, trailingIcon = { Icon(Icons.Default.ArrowDropDown, contentDescription = null, modifier = Modifier.clickable { expandedTime = true }) }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp))
+                    DropdownMenu(expanded = expandedTime, onDismissRequest = { expandedTime = false }) {
+                        timeSlots.forEach { time -> DropdownMenuItem(text = { Text(time) }, onClick = { bookingTime = time; expandedTime = false }) }
+                    }
+                }
+            }
+            item {
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    OutlinedTextField(value = if (selectedZone == "A") "Khu A — Phòng lạnh" else "Khu B — Ngoài trời", onValueChange = {}, readOnly = true, label = { Text("Khu vực") }, trailingIcon = { Icon(Icons.Default.ArrowDropDown, contentDescription = null, modifier = Modifier.clickable { expandedZone = true }) }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp))
+                    DropdownMenu(expanded = expandedZone, onDismissRequest = { expandedZone = false }) {
+                        DropdownMenuItem(text = { Text("Khu A — Phòng lạnh") }, onClick = { selectedZone = "A"; selectedTables.clear(); expandedZone = false })
+                        DropdownMenuItem(text = { Text("Khu B — Ngoài trời") }, onClick = { selectedZone = "B"; selectedTables.clear(); expandedZone = false })
+                    }
+                }
+            }
+            item { OutlinedTextField(value = guestCount, onValueChange = { if (it.all { c -> c.isDigit() }) { guestCount = it; selectedTables.clear() } }, label = { Text("Số lượng khách") }, isError = isOverLimit, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) }
+            item {
+                Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(8.dp)) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("Sơ đồ bàn", fontWeight = FontWeight.Bold)
+                        Text("Cần $tablesNeeded bàn • Đã chọn ${selectedTables.size} bàn", fontSize = 12.sp, color = Color.Gray)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(tableSummary, color = Color(0xFFFF9500), fontWeight = FontWeight.SemiBold)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        if (isLoadingTables) CircularProgressIndicator(modifier = Modifier.size(22.dp))
+                        else {
+                            val rows = kotlin.math.ceil(zoneTables.size / 4.0).toInt().coerceAtLeast(1)
+                            LazyVerticalGrid(columns = GridCells.Fixed(4), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().height((rows * 76).dp), userScrollEnabled = false) {
+                                gridItems(zoneTables) { table ->
+                                    val isSelected = selectedTables.any { it.id == table.id }
+                                    val canPick = table.status == "available"
+                                    val bg = when {
+                                        isSelected -> Color(0xFF007AFF)
+                                        table.status == "occupied" -> Color(0xFFD9E1F2)
+                                        table.status != "available" -> Color(0xFFFFF3CD)
+                                        else -> Color(0xFFE2F0D9)
+                                    }
+                                    val fg = if (isSelected) Color.White else Color.Black
+                                    Box(modifier = Modifier.fillMaxWidth().height(68.dp).background(bg, RoundedCornerShape(8.dp)).clickable(enabled = canPick && tablesNeeded > 0) {
+                                        if (isSelected) selectedTables.removeAll { it.id == table.id }
+                                        else if (selectedTables.size < tablesNeeded) selectedTables.add(table)
+                                        else Toast.makeText(context, "Đã đủ $tablesNeeded bàn", Toast.LENGTH_SHORT).show()
+                                    }, contentAlignment = Alignment.Center) {
+                                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                            Text(table.tableNumber, color = fg, fontWeight = FontWeight.Bold)
+                                            Text(if (isSelected) "Đang chọn" else if (table.status == "available") "Trống" else "Đã đặt", color = fg, fontSize = 10.sp)
+                                        }
+                                    }
+}
+                            }
                         }
                     }
                 }
             }
-
+            item { OutlinedTextField(value = depositAmount, onValueChange = {}, readOnly = true, label = { Text("Tiền đặt cọc cố định (VND)") }, supportingText = { Text("Tiền cọc sẽ được trừ khi thanh toán hóa đơn.") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) }
             item {
-                Box(modifier = Modifier.fillMaxWidth()) {
-                    OutlinedTextField(
-                        value = if (selectedZone == "A")
-                            "Khu A — Phòng lạnh (tối đa 10 người/bàn)"
-                        else
-                            "Khu B — Ngoài trời (tối đa 20 người/bàn)",
-                        onValueChange = {},
-                        readOnly = true,
-                        label = { Text("Khu vực") },
-                        trailingIcon = {
-                            Icon(
-                                Icons.Default.ArrowDropDown,
-                                contentDescription = null,
-                                modifier = Modifier.clickable { expandedZone = true }
-                            )
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(8.dp),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            unfocusedContainerColor = Color.White,
-                            focusedContainerColor = Color.White
-                        )
-                    )
-
-                    DropdownMenu(
-                        expanded = expandedZone,
-                        onDismissRequest = { expandedZone = false }
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text("Khu A — Phòng lạnh") },
-                            onClick = {
-                                selectedZone = "A"
-                                expandedZone = false
-                            }
-                        )
-
-                        DropdownMenuItem(
-                            text = { Text("Khu B — Ngoài trời") },
-                            onClick = {
-                                selectedZone = "B"
-                                expandedZone = false
-                            }
-                        )
-                    }
-                }
-            }
-
-            item {
-                OutlinedTextField(
-                    value = guestCount,
-                    onValueChange = {
-                        if (it.all { c -> c.isDigit() }) guestCount = it
-                    },
-                    label = { Text("Số lượng khách") },
-                    isError = isOverLimit,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        unfocusedContainerColor = Color.White,
-                        focusedContainerColor = Color.White
-                    )
-                )
-
-                if (tableSummary.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor =
-                                if (isOverLimit) Color(0xFFFFE5E5)
-                                else Color(0xFFE5F1FF)
-                        ),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text(
-                            text =
-                                if (isOverLimit) "Vượt giới hạn gộp bàn!"
-                                else "Phương án: $tableSummary",
-                            modifier = Modifier.padding(12.dp),
-                            color =
-                                if (isOverLimit) Color.Red
-                                else Color(0xFF007AFF),
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp
-                        )
-                    }
-                }
-            }
-
-            item {
-                OutlinedTextField(
-                    value = depositAmount,
-                    onValueChange = { depositAmount = it },
-                    label = { Text("Tiền đặt cọc (VND)") },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        unfocusedContainerColor = Color.White,
-                        focusedContainerColor = Color.White
-                    )
-                )
-
-                Spacer(modifier = Modifier.height(4.dp))
-
-                Text(
-                    "Tiền cọc sẽ được trừ vào tổng hóa đơn khi thanh toán.",
-                    fontSize = 12.sp,
-                    color = Color.Gray
-                )
-            }
-
-            item {
-                OutlinedTextField(
-                    value = note,
-                    onValueChange = { note = it },
-                    label = { Text("Yêu cầu đặc biệt") },
-                    minLines = 2,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        unfocusedContainerColor = Color.White,
-                        focusedContainerColor = Color.White
-                    )
-                )
-            }
-
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF3CD)),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
+                Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(8.dp)) {
                     Column(modifier = Modifier.padding(12.dp)) {
-                        Text(
-                            "Chính sách hủy bàn",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF856404)
-                        )
-
-                        Spacer(modifier = Modifier.height(4.dp))
-
-                        Text(
-                            "• Hủy trước 2 tiếng: Hoàn 100% tiền cọc",
-                            fontSize = 12.sp,
-                            color = Color(0xFF856404)
-                        )
-
-                        Text(
-                            "• Hủy sau 2 tiếng: Mất tiền cọc",
-                            fontSize = 12.sp,
-                            color = Color(0xFF856404)
-                        )
+                        Text("Chọn món ăn", fontWeight = FontWeight.Bold)
+                        Text("$selectedFoodCount món • ${currencyFormatter.format(menuTotal)}", color = Color.Gray, fontSize = 12.sp)
+                        if (discountPercent > 0) Text("Ưu đãi hội viên dự kiến: -${currencyFormatter.format(discountAmount)}", color = Color(0xFF34C759), fontSize = 12.sp)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        if (isLoadingMenu) CircularProgressIndicator(modifier = Modifier.size(22.dp))
+                        else foods.forEach { food ->
+                            val quantity = quantities[food.foodId] ?: 0
+                            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(food.foodName, fontWeight = FontWeight.SemiBold)
+                                    Text("${food.category} • ${currencyFormatter.format(food.price)}", color = Color.Gray, fontSize = 12.sp)
+                                }
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    OutlinedButton(onClick = { if (quantity > 0) quantities[food.foodId] = quantity - 1 }, modifier = Modifier.size(32.dp), contentPadding = PaddingValues(0.dp), shape = RoundedCornerShape(8.dp)) { Text("-") }
+                                    Text(quantity.toString(), modifier = Modifier.width(28.dp), fontWeight = FontWeight.Bold, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                                    Button(onClick = { quantities[food.foodId] = quantity + 1 }, modifier = Modifier.size(32.dp), contentPadding = PaddingValues(0.dp), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF007AFF)), shape = RoundedCornerShape(8.dp)) { Text("+", color = Color.White) }
+                                }
+                            }
+                            HorizontalDivider(color = Color(0xFFE5E5EA))
+                        }
                     }
                 }
             }
-
+            item { OutlinedTextField(value = note, onValueChange = { note = it }, label = { Text("Yêu cầu đặc biệt") }, minLines = 2, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) }
             item {
                 Button(
                     onClick = {
                         when {
-                            guestName.isEmpty() ->
-                                Toast.makeText(context, "Nhập tên!", Toast.LENGTH_SHORT).show()
-
-                            phoneNumber.isEmpty() ->
-                                Toast.makeText(context, "Nhập SĐT!", Toast.LENGTH_SHORT).show()
-
-                            bookingDate.isEmpty() ->
-                                Toast.makeText(context, "Chọn ngày!", Toast.LENGTH_SHORT).show()
-
-                            bookingTime.isEmpty() ->
-                                Toast.makeText(context, "Chọn giờ!", Toast.LENGTH_SHORT).show()
-
-                            tableSummary.isEmpty() ->
-                                Toast.makeText(context, "Nhập số khách!", Toast.LENGTH_SHORT).show()
-
-                            isOverLimit ->
-                                Toast.makeText(context, "Số khách vượt giới hạn!", Toast.LENGTH_SHORT).show()
-
+                            guestName.isBlank() -> Toast.makeText(context, "Nhập tên!", Toast.LENGTH_SHORT).show()
+                            phoneNumber.isBlank() -> Toast.makeText(context, "Nhập SĐT!", Toast.LENGTH_SHORT).show()
+                            bookingDate.isEmpty() -> Toast.makeText(context, "Chọn ngày!", Toast.LENGTH_SHORT).show()
+                            bookingTime.isEmpty() -> Toast.makeText(context, "Chọn giờ!", Toast.LENGTH_SHORT).show()
+                            guestCountInt <= 0 -> Toast.makeText(context, "Nhập số khách!", Toast.LENGTH_SHORT).show()
+                            isOverLimit -> Toast.makeText(context, "Số khách vượt giới hạn!", Toast.LENGTH_SHORT).show()
+                            selectedTables.size != tablesNeeded -> Toast.makeText(context, "Vui lòng chọn đúng $tablesNeeded bàn!", Toast.LENGTH_SHORT).show()
                             else -> {
                                 isLoading = true
-
-                                coroutineScope.launch {
-                                    withContext(Dispatchers.IO) {
-                                        var conn: HttpURLConnection? = null
-
-                                        try {
-                                            val url = URL("http://10.0.2.2:3000/api/bookings")
-                                            conn = url.openConnection() as HttpURLConnection
-
-                                            conn.requestMethod = "POST"
-                                            conn.setRequestProperty(
-                                                "Content-Type",
-                                                "application/json; utf-8"
-                                            )
-                                            conn.connectTimeout = 5000
-                                            conn.readTimeout = 5000
-                                            conn.doOutput = true
-
-                                            val body = JSONObject().apply {
-                                                put("customerUsername", loggedInUsername)
-                                                put("guestName", loggedInName)
-                                                put("phoneNumber", loggedInPhone)
-                                                put("tableNumber", tableSummary)
-                                                put("depositAmount", depositAmount.toIntOrNull() ?: 0)
-                                                put("note", note)
-                                                put("bookingDate", bookingDate)
-                                                put("bookingTime", bookingTime)
-                                            }.toString()
-
-                                            conn.outputStream.use {
-                                                it.write(body.toByteArray(Charsets.UTF_8))
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    var conn: HttpURLConnection? = null
+                                    try {
+                                        conn = URL("http://10.0.2.2:3001/api/bookings").openConnection() as HttpURLConnection
+                                        conn.requestMethod = "POST"
+                                        conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                                        conn.doOutput = true
+                                        val body = JSONObject().apply {
+                                            put("customerUsername", if (isWalkIn) "" else loggedInUsername)
+                                            put("guestName", guestName)
+                                            put("phoneNumber", phoneNumber)
+                                            put("tableNumber", tableSummary)
+                                            put("depositAmount", depositAmount.toIntOrNull() ?: 0)
+                                            put("note", note)
+                                            put("bookingDate", bookingDate)
+                                            put("bookingTime", bookingTime)
+                                        }.toString()
+                                        conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                                        val code = conn.responseCode
+                                        val response = if (code in 200..299) conn.inputStream.bufferedReader().use { it.readText() } else ""
+                                        if (code == HttpURLConnection.HTTP_CREATED || code == HttpURLConnection.HTTP_OK) {
+                                            val bookingId = JSONObject(response).optInt("bookingId", 0)
+                                            if (bookingId > 0) {
+                                                submitFoods(bookingId)
+                                                markTablesBooked()
                                             }
-
-                                            val code = conn.responseCode
-
                                             withContext(Dispatchers.Main) {
                                                 isLoading = false
-
-                                                if (code == HttpURLConnection.HTTP_CREATED || code == HttpURLConnection.HTTP_OK) {
-                                                    Toast.makeText(
-                                                        context,
-                                                        "Đặt bàn thành công!",
-                                                        Toast.LENGTH_SHORT
-                                                    ).show()
-
-                                                    onBookingSuccess()
-                                                } else {
-                                                    Toast.makeText(
-                                                        context,
-                                                        "Lỗi đặt bàn: $code",
-                                                        Toast.LENGTH_LONG
-                                                    ).show()
-                                                }
+                                                Toast.makeText(context, "Đặt bàn thành công!", Toast.LENGTH_SHORT).show()
+                                                onBookingSuccess()
                                             }
-
-                                        } catch (e: Exception) {
+                                        } else {
                                             withContext(Dispatchers.Main) {
                                                 isLoading = false
-                                                Toast.makeText(
-                                                    context,
-                                                    "Lỗi: ${e.localizedMessage}",
-                                                    Toast.LENGTH_LONG
-                                                ).show()
+                                                Toast.makeText(context, "Lỗi đặt bàn: $code", Toast.LENGTH_LONG).show()
                                             }
-                                        } finally {
-                                            conn?.disconnect()
                                         }
+                                    } catch (e: Exception) {
+                                        withContext(Dispatchers.Main) {
+                                            isLoading = false
+                                            Toast.makeText(context, "Lỗi: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                                        }
+                                    } finally {
+                                        conn?.disconnect()
                                     }
                                 }
                             }
                         }
                     },
                     enabled = !isLoading && !isOverLimit,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(52.dp),
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
                     shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF34C759)
-                    )
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF34C759))
                 ) {
-                    if (isLoading) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            color = Color.White
-                        )
-                    } else {
-                        Text(
-                            "Xác nhận đặt bàn",
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                    }
+                    if (isLoading) CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.White)
+                    else Text("Xác nhận đặt bàn", fontWeight = FontWeight.Bold, color = Color.White)
                 }
-
                 Spacer(modifier = Modifier.height(32.dp))
             }
         }
@@ -534,7 +493,7 @@ fun CustomerBookingScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CustomerOrdersScreen() {
+fun CustomerOrdersScreen(navController: NavController) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
@@ -554,7 +513,7 @@ fun CustomerOrdersScreen() {
             var conn: HttpURLConnection? = null
 
             try {
-                val url = URL("http://10.0.2.2:3000/api/bookings")
+                val url = URL("http://10.0.2.2:3001/api/bookings")
                 conn = url.openConnection() as HttpURLConnection
 
                 conn.requestMethod = "GET"
@@ -628,12 +587,36 @@ fun CustomerOrdersScreen() {
         }
     }
 
+    fun deleteBooking(booking: BookingItem) {
+        coroutineScope.launch(Dispatchers.IO) {
+            var conn: HttpURLConnection? = null
+            try {
+                val url = URL("http://10.0.2.2:3001/api/bookings/${booking.id}")
+                conn = url.openConnection() as HttpURLConnection
+                conn.requestMethod = "DELETE"
+                conn.connectTimeout = 5000
+                conn.readTimeout = 5000
+                val code = conn.responseCode
+                withContext(Dispatchers.Main) {
+                    if (code == HttpURLConnection.HTTP_OK) {
+                        Toast.makeText(context, "Đã xóa đơn đã hủy!", Toast.LENGTH_SHORT).show()
+                        loadMyBookings()
+                    } else {
+                        Toast.makeText(context, "Lỗi xóa đơn: $code", Toast.LENGTH_LONG).show()
+                    }
+                }
+            } finally {
+                conn?.disconnect()
+            }
+        }
+    }
+
     fun cancelBooking(booking: BookingItem) {
         coroutineScope.launch(Dispatchers.IO) {
             var conn: HttpURLConnection? = null
 
             try {
-                val url = URL("http://10.0.2.2:3000/api/bookings/status")
+                val url = URL("http://10.0.2.2:3001/api/bookings/status")
                 conn = url.openConnection() as HttpURLConnection
 
                 conn.requestMethod = "PUT"
@@ -737,6 +720,7 @@ fun CustomerOrdersScreen() {
                     }
 
                     val canCancel = booking.status == "pending"
+                    val canDelete = booking.status == "cancelled"
 
                     Card(
                         modifier = Modifier.fillMaxWidth(),
@@ -815,6 +799,18 @@ fun CustomerOrdersScreen() {
                                         color = Color(0xFF34C759)
                                     )
 
+                                    if (booking.id.isNotBlank() && booking.status != "cancelled") {
+                                        Button(
+                                            onClick = { navController.navigate("menu/${booking.id}") },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF007AFF)),
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                            shape = RoundedCornerShape(8.dp),
+                                            modifier = Modifier.height(30.dp)
+                                        ) {
+                                            Text("Gọi món", fontSize = 11.sp, color = Color.White)
+                                        }
+                                    }
+
                                     if (canCancel) {
                                         OutlinedButton(
                                             onClick = { cancelBooking(booking) },
@@ -846,6 +842,148 @@ fun CustomerOrdersScreen() {
     }
 }
 
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CustomerMenuScreen(navController: NavController, bookingId: Int) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val foods = remember { mutableStateListOf<CustomerMenuFood>() }
+    val quantities = remember { mutableStateMapOf<Int, Int>() }
+    var isLoading by remember { mutableStateOf(true) }
+    var isSubmitting by remember { mutableStateOf(false) }
+    val currencyFormatter = NumberFormat.getCurrencyInstance(Locale("vi", "VN"))
+    val selectedFoods = foods.filter { (quantities[it.foodId] ?: 0) > 0 }
+    val totalAmount = selectedFoods.sumOf { it.price * (quantities[it.foodId] ?: 0) }
+
+    suspend fun loadMenu() = withContext(Dispatchers.IO) {
+        var conn: HttpURLConnection? = null
+        try {
+            conn = URL("http://10.0.2.2:3001/api/menu").openConnection() as HttpURLConnection
+            conn.requestMethod = "GET"
+            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                val arr = JSONObject(conn.inputStream.bufferedReader().use { it.readText() }).getJSONArray("items")
+                val fetched = mutableListOf<CustomerMenuFood>()
+                for (i in 0 until arr.length()) {
+                    val item = arr.getJSONObject(i)
+                    fetched.add(CustomerMenuFood(item.optInt("foodId", item.optInt("FoodID")), item.optString("foodName", item.optString("FoodName", "")), item.optString("category", item.optString("Category", "")), item.optDouble("price", item.optDouble("Price", 0.0))))
+                }
+                conn.disconnect()
+                conn = URL("http://10.0.2.2:3001/api/bookings/$bookingId/order-items").openConnection() as HttpURLConnection
+                conn.requestMethod = "GET"
+                val existing = mutableMapOf<Int, Int>()
+                if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                    val orderArr = JSONObject(conn.inputStream.bufferedReader().use { it.readText() }).getJSONArray("items")
+                    for (i in 0 until orderArr.length()) {
+                        val item = orderArr.getJSONObject(i)
+                        existing[item.optInt("foodId", item.optInt("FoodID"))] = item.optInt("quantity", item.optInt("Quantity", 0))
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    foods.clear()
+                    foods.addAll(fetched)
+                    quantities.clear()
+                    quantities.putAll(existing.filterValues { it > 0 })
+                    isLoading = false
+                }
+            } else withContext(Dispatchers.Main) { isLoading = false }
+        } catch (e: Exception) {
+            withContext(Dispatchers.Main) {
+                isLoading = false
+                Toast.makeText(context, "Lỗi menu: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+            }
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    fun submitOrder() {
+        isSubmitting = true
+        coroutineScope.launch(Dispatchers.IO) {
+            var conn: HttpURLConnection? = null
+            var ok = false
+            var successCount = 0
+            try {
+                conn = URL("http://10.0.2.2:3001/api/bookings/$bookingId/order-items").openConnection() as HttpURLConnection
+                conn.requestMethod = "DELETE"
+                ok = conn.responseCode == HttpURLConnection.HTTP_OK
+            } finally {
+                conn?.disconnect()
+            }
+            if (ok) {
+                for (food in selectedFoods) {
+                    conn = null
+                    try {
+                        conn = URL("http://10.0.2.2:3001/api/order-items/add").openConnection() as HttpURLConnection
+                        conn.requestMethod = "POST"
+                        conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                        conn.doOutput = true
+                        val body = JSONObject().apply {
+                            put("bookingId", bookingId)
+                            put("foodId", food.foodId)
+                            put("quantity", quantities[food.foodId] ?: 0)
+                            put("unitPrice", food.price)
+                        }.toString()
+                        conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                        if (conn.responseCode == HttpURLConnection.HTTP_OK || conn.responseCode == HttpURLConnection.HTTP_CREATED) successCount++
+                    } finally {
+                        conn?.disconnect()
+                    }
+                }
+            }
+            withContext(Dispatchers.Main) {
+                isSubmitting = false
+                if (ok && successCount == selectedFoods.size) {
+                    Toast.makeText(context, "Đã lưu món đã gọi", Toast.LENGTH_SHORT).show()
+                    navController.popBackStack()
+                } else Toast.makeText(context, "Một số món chưa lưu được", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) { loadMenu() }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(title = { Text("Chọn món Âu", fontWeight = FontWeight.Bold) }, navigationIcon = { IconButton(onClick = { navController.popBackStack() }) { Icon(Icons.Default.ArrowBack, contentDescription = null) } }, colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.White))
+        },
+        bottomBar = {
+            Surface(color = Color.White, shadowElevation = 8.dp) {
+                Row(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Column {
+                        Text("Tổng tiền", fontSize = 12.sp, color = Color.Gray)
+                        Text(currencyFormatter.format(totalAmount), fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFF34C759))
+                    }
+                    Button(onClick = { submitOrder() }, enabled = !isSubmitting, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF007AFF)), shape = RoundedCornerShape(10.dp)) {
+                        Text(if (isSubmitting) "Đang lưu..." else "Lưu món", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    ) { padding ->
+        if (isLoading) Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+        else LazyColumn(modifier = Modifier.fillMaxSize().background(Color(0xFFF8F9FA)).padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            lazyItems(foods) { food ->
+                val quantity = quantities[food.foodId] ?: 0
+                Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp), colors = CardDefaults.cardColors(containerColor = Color.White), elevation = CardDefaults.cardElevation(1.dp)) {
+                    Row(modifier = Modifier.fillMaxWidth().padding(14.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(food.foodName, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                            Text(food.category, color = Color.Gray, fontSize = 12.sp)
+                            Text(currencyFormatter.format(food.price), color = Color(0xFFFF9500), fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedButton(onClick = { if (quantity > 0) quantities[food.foodId] = quantity - 1 }, modifier = Modifier.size(34.dp), contentPadding = PaddingValues(0.dp), shape = RoundedCornerShape(8.dp)) { Text("-") }
+                            Text(quantity.toString(), modifier = Modifier.width(32.dp), fontWeight = FontWeight.Bold, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                            Button(onClick = { quantities[food.foodId] = quantity + 1 }, modifier = Modifier.size(34.dp), contentPadding = PaddingValues(0.dp), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF007AFF)), shape = RoundedCornerShape(8.dp)) { Text("+", color = Color.White) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CustomerTableViewScreen() {
@@ -860,11 +998,12 @@ fun CustomerTableViewScreen() {
     val scrollState = rememberScrollState()
 
     LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) {
+        while (true) {
+            withContext(Dispatchers.IO) {
             var conn: HttpURLConnection? = null
 
             try {
-                val url = URL("http://10.0.2.2:3000/api/tables")
+                val url = URL("http://10.0.2.2:3001/api/tables")
                 conn = url.openConnection() as HttpURLConnection
 
                 conn.requestMethod = "GET"
@@ -878,18 +1017,34 @@ fun CustomerTableViewScreen() {
 
                     for (i in 0 until arr.length()) {
                         val item = arr.getJSONObject(i)
-                        val tNum = item.optString("tableNumber", "")
+                        val tableNumber = item.optString(
+                            "tableNumber",
+                            item.optString("TableNumber", "")
+                        ).trim()
+                        val rawStatus = item.optString(
+                            "status",
+                            item.optString("CurrentStatus", "available")
+                        )
+                        val normalizedStatus = when {
+                            rawStatus.equals("occupied", true) ||
+                                rawStatus.equals("Đang dùng", true) -> "occupied"
+                            rawStatus.equals("booked", true) ||
+                                rawStatus.equals("Đã đặt", true) -> "booked"
+                            else -> "available"
+                        }
+                        val normalizedZone = item.optString("zone", "")
+                            .trim()
+                            .uppercase()
+                            .takeIf { it == "A" || it == "B" }
+                            ?: if (tableNumber.uppercase().startsWith("A")) "A" else "B"
 
                         fetched.add(
                             TableData(
-                                id = item.getString("id"),
-                                tableNumber = tNum,
-                                tableName = "BÀN $tNum",
-                                status = item.getString("status"),
-                                zone = item.optString(
-                                    "zone",
-                                    if (tNum.startsWith("A")) "A" else "B"
-                                )
+                                id = item.optString("id", item.optString("TableID", "")),
+                                tableNumber = tableNumber,
+                                tableName = "BÀN $tableNumber",
+                                status = normalizedStatus,
+                                zone = normalizedZone
                             )
                         )
                     }
@@ -912,6 +1067,8 @@ fun CustomerTableViewScreen() {
             } finally {
                 conn?.disconnect()
             }
+            }
+            delay(5000)
         }
     }
 

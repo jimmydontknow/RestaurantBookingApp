@@ -1,36 +1,264 @@
 const express = require('express');
 const cors = require('cors');
 const sql = require('mssql');
+require('dotenv').config();
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
 
-const PORT = 3000;
+app.get('/api/health', async (req, res) => {
+    try {
+        const db = await getPool();
+        await db.request().query('SELECT 1 AS ok');
+        res.json({
+            success: true,
+            api: 'online',
+            database: 'online',
+            uptimeSeconds: Math.floor(process.uptime())
+        });
+    } catch (error) {
+        clearPool();
+        res.status(503).json({
+            success: false,
+            api: 'online',
+            database: 'reconnecting',
+            message: error.message
+        });
+    }
+});
+
+const PORT = 3001;
 
 const config = {
-    user: 'sa',
-    password: 'phamminhnhat@2006',
-    server: 'localhost',
-    instanceName: 'MINHNHAT',
-    database: 'RestaurantDB',
+    user: process.env.DB_USER || 'sa',
+    password: process.env.DB_PASSWORD,
+    server: process.env.DB_SERVER || 'localhost',
+    database: process.env.DB_NAME || 'RestaurantDB',
     options: {
-        encrypt: false,
-        trustServerCertificate: true
+        encrypt: process.env.DB_ENCRYPT === 'true',
+        trustServerCertificate: process.env.DB_TRUST_CERT !== 'false',
+        instanceName: process.env.DB_INSTANCE || undefined
     }
 };
 
-let pool;
-
-async function getPool() {
-    if (!pool) {
-        pool = await sql.connect(config);
-        console.log('Đã kết nối thành công tới Database SQL Server!');
-    }
-    return pool;
+if (!config.password) {
+    throw new Error('Thiếu biến môi trường DB_PASSWORD. Hãy tạo restaurant-backend/.env từ .env.example.');
 }
 
+let pool = null;
+let poolPromise = null;
+
+function clearPool() {
+    const oldPool = pool;
+    pool = null;
+    poolPromise = null;
+    if (oldPool) {
+        oldPool.close().catch(() => {});
+    }
+}
+
+async function getPool() {
+    if (pool && pool.connected) {
+        return pool;
+    }
+
+    if (!poolPromise) {
+        const nextPool = new sql.ConnectionPool({
+            ...config,
+            connectionTimeout: 10000,
+            requestTimeout: 15000,
+            pool: {
+                max: 10,
+                min: 0,
+                idleTimeoutMillis: 30000
+            }
+        });
+
+        nextPool.on('error', error => {
+            console.error('Kết nối SQL Server bị gián đoạn:', error.message);
+            if (pool === nextPool) {
+                clearPool();
+            }
+        });
+
+        poolPromise = nextPool.connect()
+            .then(connectedPool => {
+                pool = connectedPool;
+                poolPromise = null;
+                console.log('Đã kết nối thành công tới Database SQL Server!');
+                return connectedPool;
+            })
+            .catch(error => {
+                poolPromise = null;
+                nextPool.close().catch(() => {});
+                throw error;
+            });
+    }
+
+    return poolPromise;
+}
+
+async function waitForDatabase() {
+    while (!pool || !pool.connected) {
+        try {
+            await getPool();
+        } catch (error) {
+            console.error('SQL Server chưa sẵn sàng, thử lại sau 5 giây:', error.message);
+            await new Promise(resolve => setTimeout(resolve, 5000));
+        }
+    }
+}
+
+sql.on('error', error => {
+    console.error('Lỗi SQL Server toàn cục:', error.message);
+    clearPool();
+});
+
+
+function normalizeTableStatus(status) {
+    const value = (status || '').toString().trim().toLowerCase();
+    if (value === 'occupied' || value === 'đang dùng' || value === 'đang ăn') {
+        return 'occupied';
+    }
+    if (value === 'booked' || value === 'đã đặt') {
+        return 'booked';
+    }
+    return 'available';
+}
+
+function extractTableNumbers(summary) {
+    return Array.from(
+        new Set(((summary || '').toString().toUpperCase().match(/[AB]\d+/g) || []))
+    );
+}
+
+async function setTablesForSummary(scope, summary, status) {
+    const tableNumbers = extractTableNumbers(summary);
+    for (const tableNumber of tableNumbers) {
+        await paymentRequest(scope)
+            .input('TableNumber', sql.VarChar, tableNumber)
+            .input('Status', sql.VarChar, normalizeTableStatus(status))
+            .query(`
+                UPDATE Tables
+                SET CurrentStatus = @Status
+                WHERE UPPER(TableNumber) = @TableNumber
+            `);
+    }
+}
+
+async function reconcileBookingAndTableStatuses(pool) {
+    await ensurePaymentSchema(pool);
+
+    await pool.request().query(`
+        UPDATE Tables
+        SET CurrentStatus = CASE
+            WHEN LOWER(LTRIM(RTRIM(CurrentStatus))) IN ('occupied', N'đang dùng', N'đang ăn')
+                THEN 'occupied'
+            WHEN LOWER(LTRIM(RTRIM(CurrentStatus))) IN ('booked', N'đã đặt')
+                THEN 'booked'
+            ELSE 'available'
+        END;
+
+        UPDATE b
+        SET b.CurrentStatus = 'checked_out',
+            b.DepositPaid = 1,
+            b.PaymentMethod = COALESCE(i.PaymentMethod, b.PaymentMethod),
+            b.PaidAt = COALESCE(i.PaidAt, b.PaidAt)
+        FROM Bookings b
+        INNER JOIN (
+            SELECT BookingID, MAX(PaidAt) AS PaidAt, MAX(PaymentMethod) AS PaymentMethod
+            FROM Invoices
+            GROUP BY BookingID
+        ) i ON i.BookingID = b.BookingID;
+
+        UPDATE Tables SET CurrentStatus = 'available';
+    `);
+
+    const activeBookings = await pool.request().query(`
+        SELECT BookingID, TableSummary, CurrentStatus
+        FROM Bookings
+        WHERE CurrentStatus IN ('pending', 'checked_in')
+        ORDER BY CASE WHEN CurrentStatus = 'pending' THEN 1 ELSE 2 END,
+                 BookingID ASC
+    `);
+
+    for (const booking of activeBookings.recordset) {
+        const tableStatus = booking.CurrentStatus === 'checked_in'
+            ? 'occupied'
+            : 'booked';
+        await setTablesForSummary(pool, booking.TableSummary, tableStatus);
+    }
+}
+
+app.post('/api/admin/reconcile-statuses', async (req, res) => {
+    try {
+        const db = await getPool();
+        await reconcileBookingAndTableStatuses(db);
+        res.json({
+            success: true,
+            message: 'Đã đồng bộ trạng thái booking và bàn'
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({
+            success: false,
+            message: 'Lỗi đồng bộ trạng thái: ' + error.message
+        });
+    }
+});
+
+// ======================================================
+// LOOKUP CUSTOMER BY PHONE FOR MEMBER DISCOUNT
+// ======================================================
+
+app.get('/api/customers/lookup', async (req, res) => {
+    try {
+        const phone = (req.query.phone || '').toString().trim();
+        if (!phone) {
+            return res.status(400).json({ success: false, message: 'Thiếu số điện thoại' });
+        }
+
+        const pool = await getPool();
+        const result = await pool.request()
+            .input('Phone', sql.VarChar, phone)
+            .query(`
+                SELECT
+                    COUNT(*) AS VisitCount,
+                    ISNULL(SUM(TotalAmount), 0) AS TotalSpent
+                FROM Invoices
+                WHERE GuestPhone = @Phone
+            `);
+
+        const row = result.recordset[0] || {};
+        const visitCount = parseInt(row.VisitCount || 0);
+        const totalSpent = parseFloat(row.TotalSpent || 0);
+        let discountPercent = 0;
+
+        if (totalSpent >= 5000000) {
+            discountPercent = 7;
+        } else if (totalSpent >= 2000000) {
+            discountPercent = 5;
+        } else if (visitCount > 0 || totalSpent > 0) {
+            discountPercent = 2;
+        }
+
+        res.json({
+            success: true,
+            found: visitCount > 0 || totalSpent > 0,
+            visitCount,
+            totalSpent,
+            discountPercent
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({
+            success: false,
+            message: 'Lỗi tra cứu khách hàng: ' + error.message
+        });
+    }
+});
 // ======================================================
 // GET BOOKINGS
 // ======================================================
@@ -42,9 +270,19 @@ app.get('/api/bookings', async (req, res) => {
 
         const result = await pool.request()
             .query(`
-                SELECT *
-                FROM Bookings
-                ORDER BY BookingID DESC
+                SELECT
+                    b.*,
+                    ISNULL(o.OrderTotal, 0) AS OrderTotal,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM Invoices i WHERE i.BookingID = b.BookingID
+                    ) THEN 1 ELSE 0 END AS HasInvoice
+                FROM Bookings b
+                OUTER APPLY (
+                    SELECT SUM(Quantity * UnitPrice) AS OrderTotal
+                    FROM BookingOrderItems
+                    WHERE BookingID = b.BookingID
+                ) o
+                ORDER BY b.BookingID DESC
             `);
 
         const data = result.recordset.map(row => ({
@@ -56,8 +294,9 @@ app.get('/api/bookings', async (req, res) => {
             phoneNumber: row.PhoneNumber,
             tableSummary: row.TableSummary,
             tableNumber: row.TableSummary,
-            totalAmount: parseFloat(row.TotalAmount || 0),
-            depositAmount: parseFloat(row.TotalAmount || 0),
+            totalAmount: parseFloat(row.OrderTotal || 0),
+            depositAmount: 200000,
+            orderTotal: parseFloat(row.OrderTotal || 0),
             status: row.CurrentStatus,
             bookingDate: row.BookingDate
                 ? row.BookingDate.toISOString().split('T')[0]
@@ -65,7 +304,8 @@ app.get('/api/bookings', async (req, res) => {
             bookingTime: row.BookingTime || '',
             depositPaid:
                 row.DepositPaid === true ||
-                row.DepositPaid === 1
+                row.DepositPaid === 1,
+            hasInvoice: row.HasInvoice === true || row.HasInvoice === 1
         }));
 
         res.json({
@@ -133,7 +373,7 @@ app.post('/api/bookings', async (req, res) => {
                 ? "ghép"
                 : "đơn";
 
-        await pool.request()
+        const insertResult = await pool.request()
             .input(
                 'Code',
                 sql.VarChar,
@@ -162,7 +402,7 @@ app.post('/api/bookings', async (req, res) => {
             .input(
                 'Amount',
                 sql.Decimal(18, 2),
-                parseFloat(depositAmount || 0)
+                200000
             )
             .input(
                 'IsMerged',
@@ -201,6 +441,7 @@ app.post('/api/bookings', async (req, res) => {
                     BookingDate,
                     BookingTime
                 )
+                OUTPUT INSERTED.BookingID, INSERTED.BookingCode
                 VALUES
                 (
                     @Code,
@@ -217,9 +458,13 @@ app.post('/api/bookings', async (req, res) => {
                 )
             `);
 
+        const insertedBooking = insertResult.recordset[0];
+
         res.status(201).json({
             success: true,
-            message: "Đặt bàn thành công!"
+            message: "Đặt bàn thành công!",
+            bookingId: insertedBooking.BookingID,
+            bookingCode: insertedBooking.BookingCode
         });
 
     } catch (error) {
@@ -286,7 +531,10 @@ app.put('/api/bookings/status', async (req, res) => {
                     FROM Tables
                     WHERE TableNumber LIKE @ZoneLike
                       AND CurrentStatus = 'available'
-                    ORDER BY TableNumber ASC
+                    ORDER BY
+                        LEFT(UPPER(TableNumber), 1),
+                        TRY_CONVERT(INT, SUBSTRING(TableNumber, 2, 20)),
+                        TableNumber
                 `);
 
             const availableTables = availableTablesResult.recordset;
@@ -455,7 +703,7 @@ app.put('/api/bookings/:id', async (req, res) => {
             .input(
                 'Amount',
                 sql.Decimal(18, 2),
-                parseFloat(depositAmount || 0)
+                200000
             )
             .input(
                 'Status',
@@ -586,14 +834,17 @@ app.get('/api/tables', async (req, res) => {
             .query(`
                 SELECT *
                 FROM Tables
-                ORDER BY TableNumber ASC
+                ORDER BY
+                    LEFT(UPPER(TableNumber), 1),
+                    TRY_CONVERT(INT, SUBSTRING(TableNumber, 2, 20)),
+                    TableNumber
             `);
 
         const data = result.recordset.map(row => ({
             id: row.TableID.toString(),
             tableNumber: row.TableNumber,
             capacity: row.Capacity,
-            status: row.CurrentStatus,
+            status: normalizeTableStatus(row.CurrentStatus),
             zone:
                 row.TableNumber.startsWith('A')
                     ? 'A'
@@ -664,11 +915,12 @@ app.put('/api/tables/status', async (req, res) => {
     }
 });
 
+
 // ======================================================
-// GET INVOICES
+// GET MENU
 // ======================================================
 
-app.get('/api/invoices', async (req, res) => {
+app.get('/api/menu', async (req, res) => {
 
     try {
 
@@ -676,27 +928,28 @@ app.get('/api/invoices', async (req, res) => {
 
         const result = await pool.request()
             .query(`
-                SELECT *
-                FROM Invoices
-                ORDER BY PaidAt DESC
+                SELECT
+                    FoodID,
+                    FoodName,
+                    Price,
+                    Category,
+                    IsAvailable
+                FROM MenuItems
+                WHERE ISNULL(IsAvailable, 1) = 1
+                ORDER BY Category, FoodName
             `);
 
-        const data = result.recordset.map(row => ({
-            id: row.InvoiceID.toString(),
-            bookingId: row.BookingID.toString(),
-            bookingCode: row.BookingCode,
-            guestName: row.GuestName,
-            guestPhone: row.GuestPhone,
-            tableSummary: row.TableSummary,
-            totalAmount: parseFloat(row.TotalAmount),
-            paymentMethod: row.PaymentMethod,
-            paidAt: row.PaidAt,
-            note: row.Note || ''
+        const items = result.recordset.map(row => ({
+            foodId: row.FoodID,
+            foodName: row.FoodName,
+            price: parseFloat(row.Price || 0),
+            category: row.Category || '',
+            isAvailable: row.IsAvailable === true || row.IsAvailable === 1
         }));
 
         res.json({
             success: true,
-            invoices: data
+            items
         });
 
     } catch (error) {
@@ -705,7 +958,315 @@ app.get('/api/invoices', async (req, res) => {
 
         res.status(500).json({
             success: false,
-            message: "Lỗi hóa đơn"
+            message: "Lỗi lấy menu: " + error.message
+        });
+    }
+});
+
+// ======================================================
+// ADD FOOD TO BOOKING
+// ======================================================
+
+app.post('/api/order-items/add', async (req, res) => {
+
+    try {
+
+        const {
+            bookingId,
+            foodId,
+            quantity,
+            unitPrice
+        } = req.body;
+
+        if (!bookingId || !foodId || !quantity || quantity <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: "Thiếu thông tin món ăn"
+            });
+        }
+
+        const pool = await getPool();
+
+        const insertResult = await pool.request()
+            .input('BookingID', sql.Int, parseInt(bookingId))
+            .input('FoodID', sql.Int, parseInt(foodId))
+            .input('Quantity', sql.Int, parseInt(quantity))
+            .input('UnitPrice', sql.Decimal(18, 2), parseFloat(unitPrice || 0))
+            .query(`
+                INSERT INTO BookingOrderItems
+                (
+                    BookingID,
+                    FoodID,
+                    Quantity,
+                    UnitPrice
+                )
+                VALUES
+                (
+                    @BookingID,
+                    @FoodID,
+                    @Quantity,
+                    @UnitPrice
+                )
+            `);
+
+        res.status(201).json({
+            success: true,
+            message: "Đã thêm món"
+        });
+
+    } catch (error) {
+
+        console.error(error);
+
+        res.status(500).json({
+            success: false,
+            message: "Lỗi thêm món: " + error.message
+        });
+    }
+});
+
+app.delete('/api/bookings/:id/order-items', async (req, res) => {
+    try {
+        const pool = await getPool();
+        await pool.request()
+            .input('BookingID', sql.Int, parseInt(req.params.id))
+            .query(`
+                DELETE FROM BookingOrderItems
+                WHERE BookingID = @BookingID
+            `);
+
+        res.json({
+            success: true,
+            message: "Đã xóa món đã gọi"
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({
+            success: false,
+            message: "Lỗi xóa món đã gọi: " + error.message
+        });
+    }
+});
+
+app.get('/api/bookings/:id/order-items', async (req, res) => {
+    try {
+        const pool = await getPool();
+        const result = await pool.request()
+            .input('BookingID', sql.Int, parseInt(req.params.id))
+            .query(`
+                SELECT
+                    oi.OrderItemID,
+                    oi.BookingID,
+                    oi.FoodID,
+                    m.FoodName,
+                    m.Category,
+                    oi.Quantity,
+                    oi.UnitPrice,
+                    (oi.Quantity * oi.UnitPrice) AS LineTotal
+                FROM BookingOrderItems oi
+                LEFT JOIN MenuItems m ON m.FoodID = oi.FoodID
+                WHERE oi.BookingID = @BookingID
+                ORDER BY oi.OrderItemID ASC
+            `);
+
+        const items = result.recordset.map(row => ({
+            id: row.OrderItemID.toString(),
+            bookingId: row.BookingID.toString(),
+            foodId: row.FoodID,
+            foodName: row.FoodName || '',
+            category: row.Category || '',
+            quantity: row.Quantity,
+            unitPrice: parseFloat(row.UnitPrice || 0),
+            lineTotal: parseFloat(row.LineTotal || 0)
+        }));
+
+        res.json({
+            success: true,
+            items,
+            total: items.reduce((sum, item) => sum + item.lineTotal, 0)
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({
+            success: false,
+            message: "Lỗi lấy món đã gọi: " + error.message
+        });
+    }
+});
+// ======================================================
+// GET INVOICES
+// ======================================================
+
+async function ensurePaymentSchema(pool) {
+    await pool.request().query(`
+        IF COL_LENGTH('Bookings', 'PaymentMethod') IS NULL
+            ALTER TABLE Bookings ADD PaymentMethod NVARCHAR(20) NULL;
+        IF COL_LENGTH('Bookings', 'PaidAt') IS NULL
+            ALTER TABLE Bookings ADD PaidAt DATETIME NULL;
+        IF COL_LENGTH('Bookings', 'DepositPaid') IS NULL
+            ALTER TABLE Bookings ADD DepositPaid BIT NOT NULL
+                CONSTRAINT DF_Bookings_DepositPaid DEFAULT 0;
+
+        IF COL_LENGTH('Invoices', 'FoodSubtotal') IS NULL
+            ALTER TABLE Invoices ADD FoodSubtotal DECIMAL(18,2) NULL;
+        IF COL_LENGTH('Invoices', 'DiscountPercent') IS NULL
+            ALTER TABLE Invoices ADD DiscountPercent DECIMAL(5,2) NULL;
+        IF COL_LENGTH('Invoices', 'DiscountAmount') IS NULL
+            ALTER TABLE Invoices ADD DiscountAmount DECIMAL(18,2) NULL;
+        IF COL_LENGTH('Invoices', 'DepositAmount') IS NULL
+            ALTER TABLE Invoices ADD DepositAmount DECIMAL(18,2) NULL;
+    `);
+}
+
+function paymentRequest(scope) {
+    return scope instanceof sql.Transaction
+        ? new sql.Request(scope)
+        : scope.request();
+}
+
+async function calculatePaymentSummary(scope, bookingId) {
+    const parsedBookingId = parseInt(bookingId);
+    if (!Number.isInteger(parsedBookingId) || parsedBookingId <= 0) {
+        const error = new Error('BookingID không hợp lệ');
+        error.statusCode = 400;
+        throw error;
+    }
+
+    const bookingResult = await paymentRequest(scope)
+        .input('BookingID', sql.Int, parsedBookingId)
+        .query(`
+            SELECT BookingID, BookingCode, GuestName, PhoneNumber, TableSummary,
+                   CurrentStatus
+            FROM Bookings
+            WHERE BookingID = @BookingID
+        `);
+
+    if (bookingResult.recordset.length === 0) {
+        const error = new Error('Không tìm thấy đơn đặt bàn');
+        error.statusCode = 404;
+        throw error;
+    }
+
+    const booking = bookingResult.recordset[0];
+    const orderResult = await paymentRequest(scope)
+        .input('BookingID', sql.Int, parsedBookingId)
+        .query(`
+            SELECT
+                oi.FoodID AS foodId,
+                ISNULL(m.FoodName, N'Món ăn') AS foodName,
+                oi.Quantity AS quantity,
+                oi.UnitPrice AS unitPrice,
+                (oi.Quantity * oi.UnitPrice) AS lineTotal
+            FROM BookingOrderItems oi
+            LEFT JOIN MenuItems m ON m.FoodID = oi.FoodID
+            WHERE oi.BookingID = @BookingID
+            ORDER BY oi.OrderItemID ASC
+        `);
+
+    const items = orderResult.recordset.map(item => ({
+        foodId: parseInt(item.foodId),
+        foodName: item.foodName,
+        quantity: parseInt(item.quantity || 0),
+        unitPrice: parseFloat(item.unitPrice || 0),
+        lineTotal: parseFloat(item.lineTotal || 0)
+    }));
+    const foodSubtotal = items.reduce((sum, item) => sum + item.lineTotal, 0);
+
+    const loyaltyResult = await paymentRequest(scope)
+        .input('Phone', sql.NVarChar, booking.PhoneNumber || '')
+        .input('BookingID', sql.Int, parsedBookingId)
+        .query(`
+            SELECT
+                COUNT(*) AS VisitCount,
+                ISNULL(SUM(TotalAmount), 0) AS TotalSpent
+            FROM Invoices
+            WHERE GuestPhone = @Phone
+              AND BookingID <> @BookingID
+        `);
+
+    const loyalty = loyaltyResult.recordset[0] || {};
+    const visitCount = parseInt(loyalty.VisitCount || 0);
+    const previousSpent = parseFloat(loyalty.TotalSpent || 0);
+    let discountPercent = 0;
+    if (previousSpent >= 5000000) {
+        discountPercent = 7;
+    } else if (previousSpent >= 2000000) {
+        discountPercent = 5;
+    } else if (visitCount > 0 || previousSpent > 0) {
+        discountPercent = 2;
+    }
+
+    const discountAmount = Math.round(foodSubtotal * discountPercent / 100);
+    const amountAfterDiscount = Math.max(0, foodSubtotal - discountAmount);
+    const depositAmount = 200000;
+    const amountDue = Math.max(0, amountAfterDiscount - depositAmount);
+
+    return {
+        bookingId: parsedBookingId,
+        bookingCode: booking.BookingCode,
+        guestName: booking.GuestName,
+        guestPhone: booking.PhoneNumber || '',
+        tableSummary: booking.TableSummary,
+        status: booking.CurrentStatus,
+        items,
+        foodSubtotal,
+        visitCount,
+        previousSpent,
+        discountPercent,
+        discountAmount,
+        amountAfterDiscount,
+        depositAmount,
+        amountDue
+    };
+}
+
+app.get('/api/bookings/:id/payment-summary', async (req, res) => {
+    try {
+        const pool = await getPool();
+        await ensurePaymentSchema(pool);
+        const summary = await calculatePaymentSummary(pool, req.params.id);
+        res.json({ success: true, summary });
+    } catch (error) {
+        console.error(error);
+        res.status(error.statusCode || 500).json({
+            success: false,
+            message: 'Lỗi tính thanh toán: ' + error.message
+        });
+    }
+});
+
+app.get('/api/invoices', async (req, res) => {
+    try {
+        const pool = await getPool();
+        await ensurePaymentSchema(pool);
+        const result = await pool.request().query(`
+            SELECT *
+            FROM Invoices
+            ORDER BY PaidAt DESC
+        `);
+
+        const data = result.recordset.map(row => ({
+            id: row.InvoiceID.toString(),
+            bookingId: row.BookingID.toString(),
+            bookingCode: row.BookingCode,
+            guestName: row.GuestName,
+            guestPhone: row.GuestPhone,
+            tableSummary: row.TableSummary,
+            foodSubtotal: parseFloat(row.FoodSubtotal || 0),
+            discountPercent: parseFloat(row.DiscountPercent || 0),
+            discountAmount: parseFloat(row.DiscountAmount || 0),
+            depositAmount: parseFloat(row.DepositAmount || 0),
+            totalAmount: parseFloat(row.TotalAmount || 0),
+            paymentMethod: row.PaymentMethod,
+            paidAt: row.PaidAt,
+            note: row.Note || ''
+        }));
+        res.json({ success: true, invoices: data });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({
+            success: false,
+            message: 'Lỗi hóa đơn: ' + error.message
         });
     }
 });
@@ -715,128 +1276,163 @@ app.get('/api/invoices', async (req, res) => {
 // ======================================================
 
 app.post('/api/invoices', async (req, res) => {
+    const pool = await getPool();
+    await ensurePaymentSchema(pool);
+    const transaction = new sql.Transaction(pool);
 
     try {
+        const bookingId = parseInt(req.body.bookingId);
+        const paymentMethod = req.body.paymentMethod === 'transfer'
+            ? 'transfer'
+            : 'cash';
+        const note = (req.body.note || '').toString().trim();
 
-        const {
-            bookingId,
-            bookingCode,
-            guestName,
-            guestPhone,
-            tableSummary,
-            totalAmount,
-            paymentMethod,
-            note
-        } = req.body;
+        await transaction.begin(sql.ISOLATION_LEVEL.SERIALIZABLE);
 
-        const pool = await getPool();
-
-        await pool.request()
-            .input(
-                'BookingID',
-                sql.Int,
-                parseInt(bookingId)
-            )
-            .input(
-                'BookingCode',
-                sql.VarChar,
-                bookingCode
-            )
-            .input(
-                'GuestName',
-                sql.NVarChar,
-                guestName
-            )
-            .input(
-                'GuestPhone',
-                sql.VarChar,
-                guestPhone || ''
-            )
-            .input(
-                'TableSummary',
-                sql.NVarChar,
-                tableSummary
-            )
-            .input(
-                'TotalAmount',
-                sql.Decimal(18, 2),
-                parseFloat(totalAmount)
-            )
-            .input(
-                'PaymentMethod',
-                sql.VarChar,
-                paymentMethod
-            )
-            .input(
-                'Note',
-                sql.NVarChar,
-                note || ''
-            )
+        const duplicateResult = await paymentRequest(transaction)
+            .input('BookingID', sql.Int, bookingId)
             .query(`
-               INSERT INTO Invoices
-               (
-                   BookingID,
-                   BookingCode,
-                   GuestName,
-                   GuestPhone,
-                   TableSummary,
-                   TotalAmount,
-                   PaymentMethod,
-                   Note,
-                   PaidAt
-               )
-               VALUES
-               (
-                   @BookingID,
-                   @BookingCode,
-                   @GuestName,
-                   @GuestPhone,
-                   @TableSummary,
-                   @TotalAmount,
-                   @PaymentMethod,
-                   @Note,
-                   GETDATE()
-               )
+                SELECT TOP 1 InvoiceID
+                FROM Invoices WITH (UPDLOCK, HOLDLOCK)
+                WHERE BookingID = @BookingID
             `);
 
-        await pool.request()
-            .input(
-                'ID',
-                sql.Int,
-                parseInt(bookingId)
-            )
-            .input(
-                'PaymentMethod',
-                sql.VarChar,
-                paymentMethod
-            )
+        if (duplicateResult.recordset.length > 0) {
+            const existingResult = await paymentRequest(transaction)
+                .input('BookingID', sql.Int, bookingId)
+                .query(`
+                    SELECT TOP 1 *
+                    FROM Invoices
+                    WHERE BookingID = @BookingID
+                    ORDER BY PaidAt DESC, InvoiceID DESC
+                `);
+            const existing = existingResult.recordset[0];
+            const summary = await calculatePaymentSummary(transaction, bookingId);
+
+            await paymentRequest(transaction)
+                .input('ID', sql.Int, bookingId)
+                .input('PaymentMethod', sql.NVarChar, existing.PaymentMethod || paymentMethod)
+                .input('PaidAt', sql.DateTime, existing.PaidAt || new Date())
+                .query(`
+                    UPDATE Bookings
+                    SET CurrentStatus = 'checked_out',
+                        PaymentMethod = @PaymentMethod,
+                        PaidAt = @PaidAt,
+                        DepositPaid = 1
+                    WHERE BookingID = @ID
+                `);
+            await setTablesForSummary(transaction, summary.tableSummary, 'available');
+            await transaction.commit();
+
+            return res.status(200).json({
+                success: true,
+                alreadyPaid: true,
+                message: 'Đơn đã thanh toán, trạng thái đã được đồng bộ',
+                invoice: {
+                    ...summary,
+                    foodSubtotal: parseFloat(existing.FoodSubtotal || summary.foodSubtotal),
+                    discountPercent: parseFloat(existing.DiscountPercent || 0),
+                    discountAmount: parseFloat(existing.DiscountAmount || 0),
+                    depositAmount: parseFloat(existing.DepositAmount || 200000),
+                    amountDue: parseFloat(existing.TotalAmount || 0),
+                    invoiceId: existing.InvoiceID.toString(),
+                    paidAt: existing.PaidAt,
+                    paymentMethod: existing.PaymentMethod || paymentMethod,
+                    note: existing.Note || ''
+                }
+            });
+        }
+
+        const summary = await calculatePaymentSummary(transaction, bookingId);
+        const orderNote = summary.items.length > 0
+            ? 'Món đã gọi: ' + summary.items
+                .map(item => item.foodName + ' x' + item.quantity)
+                .join(', ')
+            : 'Chưa gọi món';
+        const discountNote = summary.discountPercent > 0
+            ? 'Giảm giá hội viên ' + summary.discountPercent +
+              '%: -' + summary.discountAmount + ' VND'
+            : '';
+        const depositNote = 'Đã trừ tiền cọc: -' + summary.depositAmount + ' VND';
+        const invoiceNote = [note, orderNote, discountNote, depositNote]
+            .filter(Boolean)
+            .join(' | ');
+
+        const insertResult = await paymentRequest(transaction)
+            .input('BookingID', sql.Int, bookingId)
+            .input('BookingCode', sql.NVarChar, summary.bookingCode)
+            .input('GuestName', sql.NVarChar, summary.guestName)
+            .input('GuestPhone', sql.NVarChar, summary.guestPhone)
+            .input('TableSummary', sql.NVarChar, summary.tableSummary)
+            .input('FoodSubtotal', sql.Decimal(18, 2), summary.foodSubtotal)
+            .input('DiscountPercent', sql.Decimal(5, 2), summary.discountPercent)
+            .input('DiscountAmount', sql.Decimal(18, 2), summary.discountAmount)
+            .input('DepositAmount', sql.Decimal(18, 2), summary.depositAmount)
+            .input('TotalAmount', sql.Decimal(18, 2), summary.amountDue)
+            .input('PaymentMethod', sql.NVarChar, paymentMethod)
+            .input('Note', sql.NVarChar, invoiceNote)
+            .query(`
+                INSERT INTO Invoices
+                (
+                    BookingID, BookingCode, GuestName, GuestPhone,
+                    TableSummary, FoodSubtotal, DiscountPercent,
+                    DiscountAmount, DepositAmount, TotalAmount,
+                    PaymentMethod, Note, PaidAt
+                )
+                OUTPUT INSERTED.InvoiceID, INSERTED.PaidAt
+                VALUES
+                (
+                    @BookingID, @BookingCode, @GuestName, @GuestPhone,
+                    @TableSummary, @FoodSubtotal, @DiscountPercent,
+                    @DiscountAmount, @DepositAmount, @TotalAmount,
+                    @PaymentMethod, @Note, GETDATE()
+                )
+            `);
+
+        await paymentRequest(transaction)
+            .input('ID', sql.Int, bookingId)
+            .input('PaymentMethod', sql.NVarChar, paymentMethod)
             .query(`
                 UPDATE Bookings
-                SET
-                    CurrentStatus='checked_out',
-                    PaymentMethod=@PaymentMethod,
-                    PaidAt=GETDATE()
-                WHERE BookingID=@ID
+                SET CurrentStatus = 'checked_out',
+                    PaymentMethod = @PaymentMethod,
+                    PaidAt = GETDATE(),
+                    DepositPaid = 1
+                WHERE BookingID = @ID
             `);
+
+        await setTablesForSummary(transaction, summary.tableSummary, 'available');
+        await transaction.commit();
 
         res.status(201).json({
             success: true,
-            message: "Thanh toán thành công!"
+            message: 'Thanh toán thành công!',
+            invoice: {
+                ...summary,
+                invoiceId: insertResult.recordset[0].InvoiceID.toString(),
+                paidAt: insertResult.recordset[0].PaidAt,
+                paymentMethod,
+                note: invoiceNote
+            }
         });
-
     } catch (error) {
-
+        if (transaction._aborted !== true) {
+            try {
+                await transaction.rollback();
+            } catch (_) {
+                // Transaction may already be closed.
+            }
+        }
         console.error(error);
-
-        res.status(500).json({
+        res.status(error.statusCode || 500).json({
             success: false,
-            message: "Lỗi thanh toán: " + error.message
+            message: 'Lỗi thanh toán: ' + error.message
         });
     }
 });
 
 // ======================================================
-// DASHBOARD STATS
+// // DASHBOARD STATS
 // ======================================================
 
 app.get('/api/dashboard/stats', async (req, res) => {
@@ -906,23 +1502,36 @@ app.get('/api/dashboard/stats', async (req, res) => {
 // START SERVER
 // ======================================================
 
-getPool()
-    .then(() => {
+const httpServer = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server chạy tại: http://localhost:${PORT}`);
+    waitForDatabase()
+        .then(() => getPool())
+        .then(db => reconcileBookingAndTableStatuses(db))
+        .then(() => console.log('Đã đồng bộ trạng thái booking và bàn'))
+        .catch(error => console.error('Lỗi đồng bộ khi khởi động:', error));
+});
 
-        app.listen(PORT, () => {
+httpServer.on('error', error => {
+    console.error('Không thể khởi động HTTP server:', error);
+    process.exit(1);
+});
 
-            console.log(
-                `Server chạy tại: http://localhost:${PORT}`
-            );
-        });
-
-    })
-    .catch(err => {
-
-        console.error(
-            'Không thể kết nối SQL Server:',
-            err
-        );
-
-        process.exit(1);
+async function shutdown(signal) {
+    console.log(`Đang dừng backend (${signal})...`);
+    httpServer.close(async () => {
+        if (pool) {
+            await pool.close().catch(() => {});
+        }
+        process.exit(0);
     });
+    setTimeout(() => process.exit(1), 5000).unref();
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('unhandledRejection', error => {
+    console.error('Unhandled rejection:', error);
+});
+process.on('uncaughtException', error => {
+    console.error('Uncaught exception:', error);
+});

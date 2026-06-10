@@ -124,6 +124,10 @@ fun LoginScreen(navController: NavController) {
             "admin" -> {
                 navController.navigate("admin_main")
             }
+
+            "employee" -> {
+                navController.navigate("employee_main")
+            }
         }
     }
 
@@ -199,6 +203,10 @@ fun LoginScreen(navController: NavController) {
             "admin" -> {
                 navController.navigate("admin_main")
             }
+
+            "employee" -> {
+                navController.navigate("employee_main")
+            }
         }
     }
 
@@ -273,14 +281,44 @@ fun LoginScreen(navController: NavController) {
                 ) {
 
                     Text(
-                        "👔  Quản lý / Nhân viên",
+                        "👔  Quản lý / Lễ tân",
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color.White
                     )
 
                     Text(
-                        "Đăng nhập để quản lý hệ thống",
+                        "Toàn quyền quản lý hệ thống",
+                        fontSize = 12.sp,
+                        color = Color.White.copy(alpha = 0.8f)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Button(
+                onClick = {
+                    selectedRole = "employee"
+                    resetForm()
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(60.dp),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF007AFF)
+                )
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        "Nhân viên",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                    Text(
+                        "Bàn, món ăn, thanh toán và tra cứu khách",
                         fontSize = 12.sp,
                         color = Color.White.copy(alpha = 0.8f)
                     )
@@ -341,10 +379,11 @@ fun LoginScreen(navController: NavController) {
                     title = {
 
                         Text(
-                            if (selectedRole == "customer")
-                                "Khách hàng"
-                            else
-                                "Quản lý / Nhân viên",
+                            when (selectedRole) {
+                                "customer" -> "Khách hàng"
+                                "employee" -> "Nhân viên"
+                                else -> "Quản lý / Lễ tân"
+                            },
 
                             fontWeight = FontWeight.Bold
                         )

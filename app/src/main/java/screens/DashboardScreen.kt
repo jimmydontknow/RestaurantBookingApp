@@ -60,7 +60,7 @@ fun DashboardScreen(navController: NavController) {
         withContext(Dispatchers.IO) {
             var conn: HttpURLConnection? = null
             try {
-                val url = URL("http://10.0.2.2:3000/api/dashboard/stats")
+                val url = URL("http://10.0.2.2:3001/api/dashboard/stats")
                 conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"
                 conn.connectTimeout = 5000

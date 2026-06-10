@@ -37,7 +37,7 @@ fun EditBookingScreen(navController: NavController, bookingId: String) {
     var guestName by remember { mutableStateOf("") }
     var phoneNumber by remember { mutableStateOf("") }
     var tableNumber by remember { mutableStateOf("") }
-    var depositAmount by remember { mutableStateOf("") }
+    var depositAmount by remember { mutableStateOf("200000") }
     var note by remember { mutableStateOf("") }
     var selectedStatus by remember { mutableStateOf("pending") }
     var isLoading by remember { mutableStateOf(true) }
@@ -55,7 +55,7 @@ fun EditBookingScreen(navController: NavController, bookingId: String) {
         withContext(Dispatchers.IO) {
             var conn: HttpURLConnection? = null
             try {
-                val url = URL("http://10.0.2.2:3000/api/bookings")
+                val url = URL("http://10.0.2.2:3001/api/bookings")
                 conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"
                 conn.connectTimeout = 5000
@@ -75,7 +75,7 @@ fun EditBookingScreen(navController: NavController, bookingId: String) {
                                 guestName = item.getString("guestName")
                                 phoneNumber = item.getString("guestPhone")
                                 tableNumber = tableNum
-                                depositAmount = item.getDouble("totalAmount").toInt().toString()
+                                depositAmount = "200000"
                                 selectedStatus = item.getString("status")
                                 isLoading = false
                             }
@@ -153,8 +153,9 @@ fun EditBookingScreen(navController: NavController, bookingId: String) {
 
                 // 4. Tiền cọc
                 OutlinedTextField(
-                    value = depositAmount, onValueChange = { depositAmount = it },
-                    label = { Text("Số tiền đặt cọc (VND)") },
+                    value = depositAmount, onValueChange = {}, readOnly = true,
+                    label = { Text("Tiền đặt cọc cố định (VND)") },
+                    supportingText = { Text("Tiền cọc sẽ được trừ khi thanh toán hóa đơn.") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp),
                     colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Color(0xFF007AFF), unfocusedContainerColor = Color.White, focusedContainerColor = Color.White)
@@ -237,7 +238,7 @@ fun EditBookingScreen(navController: NavController, bookingId: String) {
                                         var conn: HttpURLConnection? = null
                                         try {
                                             // Gọi PUT cập nhật trạng thái sang "cancelled"
-                                            val url = URL("http://10.0.2.2:3000/api/bookings/$bookingId")
+                                            val url = URL("http://10.0.2.2:3001/api/bookings/$bookingId")
                                             conn = url.openConnection() as HttpURLConnection
                                             conn.requestMethod = "PUT"
                                             conn.setRequestProperty("Content-Type", "application/json; utf-8")

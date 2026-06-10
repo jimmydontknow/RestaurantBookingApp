@@ -31,6 +31,10 @@ data class InvoiceItem(
     val guestName: String,
     val guestPhone: String,
     val tableSummary: String,
+    val foodSubtotal: Double,
+    val discountPercent: Double,
+    val discountAmount: Double,
+    val depositAmount: Double,
     val totalAmount: Double,
     val paymentMethod: String,
     val paidAt: String,
@@ -55,7 +59,7 @@ fun InvoiceListScreen(navController: NavController) {
             var conn: HttpURLConnection? = null
 
             try {
-                val url = URL("http://10.0.2.2:3000/api/invoices")
+                val url = URL("http://10.0.2.2:3001/api/invoices")
                 conn = url.openConnection() as HttpURLConnection
 
                 conn.requestMethod = "GET"
@@ -78,6 +82,10 @@ fun InvoiceListScreen(navController: NavController) {
                                 guestName = obj.optString("guestName"),
                                 guestPhone = obj.optString("guestPhone"),
                                 tableSummary = obj.optString("tableSummary"),
+                                foodSubtotal = obj.optDouble("foodSubtotal", 0.0),
+                                discountPercent = obj.optDouble("discountPercent", 0.0),
+                                discountAmount = obj.optDouble("discountAmount", 0.0),
+                                depositAmount = obj.optDouble("depositAmount", 0.0),
                                 totalAmount = obj.optDouble("totalAmount", 0.0),
                                 paymentMethod = obj.optString("paymentMethod", "cash"),
                                 paidAt = obj.optString("paidAt", ""),
@@ -318,6 +326,26 @@ fun InvoiceCard(
                 Text(
                     text = "Ghi chú: ${invoice.note}",
                     color = Color.Gray,
+                    fontSize = 12.sp
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            if (invoice.foodSubtotal > 0 || invoice.depositAmount > 0) {
+                Text(
+                    text = "Tiền món: ${currencyFormatter.format(invoice.foodSubtotal)}",
+                    color = Color.Gray,
+                    fontSize = 12.sp
+                )
+                Text(
+                    text = "Giảm hội viên (${invoice.discountPercent.toInt()}%): -${currencyFormatter.format(invoice.discountAmount)}",
+                    color = Color(0xFF34C759),
+                    fontSize = 12.sp
+                )
+                Text(
+                    text = "Đã trừ cọc: -${currencyFormatter.format(invoice.depositAmount)}",
+                    color = Color(0xFFFF9500),
                     fontSize = 12.sp
                 )
             }

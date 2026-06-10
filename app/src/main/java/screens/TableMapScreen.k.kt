@@ -37,7 +37,7 @@ fun TableMapScreen(navController: NavController) {
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             try {
-                val url = URL("http://10.0.2.2:3000/api/tables-layout")
+                val url = URL("http://10.0.2.2:3001/api/tables-layout")
                 val conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"
                 if (conn.responseCode == HttpURLConnection.HTTP_OK) {

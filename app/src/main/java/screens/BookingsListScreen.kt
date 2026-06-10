@@ -30,7 +30,11 @@ import java.net.URL
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun BookingsListScreen(navController: NavController) {
+fun BookingsListScreen(
+    navController: NavController,
+    canManageBookings: Boolean = true,
+    canOrderFood: Boolean = true
+) {
     val bookingList = remember { mutableStateListOf<BookingItem>() }
     var searchQuery by remember { mutableStateOf("") }
     var selectedFilter by remember { mutableStateOf("Tất cả") }
@@ -45,7 +49,7 @@ fun BookingsListScreen(navController: NavController) {
     fun fetchBookings() {
         coroutineScope.launch(Dispatchers.IO) {
             try {
-                val url = URL("http://10.0.2.2:3000/api/bookings")
+                val url = URL("http://10.0.2.2:3001/api/bookings")
                 val conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"
                 conn.connectTimeout = 5000
@@ -58,17 +62,18 @@ fun BookingsListScreen(navController: NavController) {
                         val obj = jsonArray.getJSONObject(i)
                         fetched.add(
                             BookingItem(
-                                id = obj.optString("id"),
-                                bookingCode = obj.optString("bookingCode"),
-                                guestName = obj.optString("guestName"),
-                                guestPhone = obj.optString("guestPhone"),
-                                tableSummary = obj.optString("tableSummary"),
-                                totalAmount = obj.optDouble("totalAmount", 0.0),
-                                status = obj.optString("status", "pending"),
+                                id = obj.optString("id", obj.optString("BookingID", "")),
+                                bookingCode = obj.optString("bookingCode", obj.optString("BookingCode", "")),
+                                guestName = obj.optString("guestName", obj.optString("GuestName", "")),
+                                guestPhone = obj.optString("guestPhone", obj.optString("PhoneNumber", "")),
+                                tableSummary = obj.optString("tableSummary", obj.optString("TableSummary", "")),
+                                totalAmount = obj.optDouble("totalAmount", obj.optDouble("TotalAmount", 0.0)),
+                                status = obj.optString("status", obj.optString("CurrentStatus", "pending")),
 
                                 // THÊM
-                                bookingDate = obj.optString("bookingDate", ""),
-                                bookingTime = obj.optString("bookingTime", "")
+                                bookingDate = obj.optString("bookingDate", obj.optString("BookingDate", "")),
+                                bookingTime = obj.optString("bookingTime", obj.optString("BookingTime", "")),
+                                hasInvoice = obj.optBoolean("hasInvoice", false)
                             )
                         )
                     }
@@ -89,7 +94,7 @@ fun BookingsListScreen(navController: NavController) {
                 var conn: HttpURLConnection? = null
                 try {
                     // Bước 1: Cập nhật trạng thái booking
-                    val url = URL("http://10.0.2.2:3000/api/bookings/status")
+                    val url = URL("http://10.0.2.2:3001/api/bookings/status")
                     conn = url.openConnection() as HttpURLConnection
                     conn.requestMethod = "PUT"
                     conn.setRequestProperty("Content-Type", "application/json; utf-8")
@@ -112,7 +117,7 @@ fun BookingsListScreen(navController: NavController) {
 
                             // ĐÃ SỬA: Gọi trực tiếp logic cập nhật bàn thay vì gọi hàm suspend riêng
                             try {
-                                val urlTables = URL("http://10.0.2.2:3000/api/tables")
+                                val urlTables = URL("http://10.0.2.2:3001/api/tables")
                                 val connTables = urlTables.openConnection() as HttpURLConnection
                                 connTables.requestMethod = "GET"
                                 connTables.connectTimeout = 5000
@@ -134,7 +139,7 @@ fun BookingsListScreen(navController: NavController) {
                                             val tableId = t.getString("id")
                                             var connUpdate: HttpURLConnection? = null
                                             try {
-                                                val urlUpdate = URL("http://10.0.2.2:3000/api/tables/status")
+                                                val urlUpdate = URL("http://10.0.2.2:3001/api/tables/status")
                                                 connUpdate = urlUpdate.openConnection() as HttpURLConnection
                                                 connUpdate.requestMethod = "PUT"
                                                 connUpdate.setRequestProperty("Content-Type", "application/json; utf-8")
@@ -188,7 +193,7 @@ fun BookingsListScreen(navController: NavController) {
         withContext(Dispatchers.IO) {
             try {
                 // Lấy danh sách bàn để tìm ID theo tableNumber
-                val urlTables = URL("http://10.0.2.2:3000/api/tables")
+                val urlTables = URL("http://10.0.2.2:3001/api/tables")
                 val connTables = urlTables.openConnection() as HttpURLConnection
                 connTables.requestMethod = "GET"
                 connTables.connectTimeout = 5000
@@ -213,7 +218,7 @@ fun BookingsListScreen(navController: NavController) {
                             // Gọi API cập nhật trạng thái bàn
                             var connUpdate: HttpURLConnection? = null
                             try {
-                                val urlUpdate = URL("http://10.0.2.2:3000/api/tables/status")
+                                val urlUpdate = URL("http://10.0.2.2:3001/api/tables/status")
                                 connUpdate = urlUpdate.openConnection() as HttpURLConnection
                                 connUpdate.requestMethod = "PUT"
                                 connUpdate.setRequestProperty("Content-Type", "application/json; utf-8")
@@ -245,7 +250,7 @@ fun BookingsListScreen(navController: NavController) {
         coroutineScope.launch(Dispatchers.IO) {
             var conn: HttpURLConnection? = null
             try {
-                val url = URL("http://10.0.2.2:3000/api/bookings/status")
+                val url = URL("http://10.0.2.2:3001/api/bookings/status")
                 conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "PUT"
                 conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
@@ -273,7 +278,7 @@ fun BookingsListScreen(navController: NavController) {
         coroutineScope.launch(Dispatchers.IO) {
             var conn: HttpURLConnection? = null
             try {
-                val url = URL("http://10.0.2.2:3000/api/bookings/cancelled")
+                val url = URL("http://10.0.2.2:3001/api/bookings/cancelled")
                 conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "DELETE"
                 conn.connectTimeout = 5000
@@ -302,14 +307,14 @@ fun BookingsListScreen(navController: NavController) {
             "Đang phục vụ" -> it.status == "checked_in"
             "Đã rời" -> it.status == "checked_out"
             "Đã hủy" -> it.status == "cancelled"
-            else -> it.status != "cancelled"
+            else -> it.status == "pending" || it.status == "checked_in"
         }
         matchSearch && matchStatus
     }
 
     Scaffold(
         floatingActionButton = {
-            FloatingActionButton(
+            if (canManageBookings) FloatingActionButton(
                 onClick = { navController.navigate("create_booking") },
                 containerColor = Color(0xFF007AFF)
             ) {
@@ -393,8 +398,10 @@ fun BookingsListScreen(navController: NavController) {
                         BookingCardWithStatus(
                             booking = booking,
                             onLongClick = {
-                                selectedBookingForAction = booking
-                                showActionDialog = true
+                                if (canManageBookings) {
+                                    selectedBookingForAction = booking
+                                    showActionDialog = true
+                                }
                             },
                             onStatusChange = { newStatus ->
                                 updateBookingStatus(booking, newStatus)
@@ -402,7 +409,11 @@ fun BookingsListScreen(navController: NavController) {
                             // ĐÃ THÊM: Điều hướng sang PaymentScreen
                             onPayment = {
                                 navController.navigate("Payment/${booking.id}")
-                            }
+                            },
+                            onOrderFood = {
+                                navController.navigate("menu/${booking.id}")
+                            },
+                            canOrderFood = canOrderFood
                         )
                     }
                 }
@@ -411,7 +422,7 @@ fun BookingsListScreen(navController: NavController) {
     }
 
     // Dialog tùy chọn khi nhấn giữ
-    if (showActionDialog && selectedBookingForAction != null) {
+    if (canManageBookings && showActionDialog && selectedBookingForAction != null) {
         val booking = selectedBookingForAction!!
         AlertDialog(
             onDismissRequest = { showActionDialog = false },
@@ -448,7 +459,9 @@ fun BookingCardWithStatus(
     booking: BookingItem,
     onLongClick: () -> Unit,
     onStatusChange: (String) -> Unit,
-    onPayment: () -> Unit
+    onPayment: () -> Unit,
+    onOrderFood: () -> Unit,
+    canOrderFood: Boolean
 )
 {
     // Màu và nhãn theo trạng thái hiện tại
@@ -515,6 +528,17 @@ fun BookingCardWithStatus(
 
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(text = "${booking.totalAmount.toLong()} VND", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+
+                    if (canOrderFood && booking.status == "checked_in") {
+                        OutlinedButton(
+                            onClick = onOrderFood,
+                            contentPadding = PaddingValues(horizontal = 9.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.height(30.dp)
+                        ) {
+                            Text("Gọi món", fontSize = 11.sp)
+                        }
+                    }
 
                     // Nút nhỏ chuyển trạng thái tiếp theo
                     if (nextAction != null) {
