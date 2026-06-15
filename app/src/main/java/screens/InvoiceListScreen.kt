@@ -6,12 +6,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -27,6 +29,7 @@ import java.util.Locale
 
 data class InvoiceItem(
     val id: String,
+    val bookingId: String,
     val bookingCode: String,
     val guestName: String,
     val guestPhone: String,
@@ -44,6 +47,7 @@ data class InvoiceItem(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun InvoiceListScreen(navController: NavController) {
+    val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
     val invoiceList = remember { mutableStateListOf<InvoiceItem>() }
@@ -51,6 +55,7 @@ fun InvoiceListScreen(navController: NavController) {
     var searchQuery by remember { mutableStateOf("") }
     var selectedDate by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(true) }
+    var printingInvoiceId by remember { mutableStateOf<String?>(null) }
 
     val currencyFormatter = NumberFormat.getCurrencyInstance(Locale("vi", "VN"))
 
@@ -78,6 +83,7 @@ fun InvoiceListScreen(navController: NavController) {
                         fetched.add(
                             InvoiceItem(
                                 id = obj.optString("id"),
+                                bookingId = obj.optString("bookingId"),
                                 bookingCode = obj.optString("bookingCode"),
                                 guestName = obj.optString("guestName"),
                                 guestPhone = obj.optString("guestPhone"),
@@ -248,7 +254,34 @@ fun InvoiceListScreen(navController: NavController) {
                 items(filteredInvoices, key = { it.id }) { invoice ->
                     InvoiceCard(
                         invoice = invoice,
-                        currencyFormatter = currencyFormatter
+                        currencyFormatter = currencyFormatter,
+                        isPrinting = printingInvoiceId == invoice.id,
+                        onViewDetail = {
+                            navController.navigate("InvoiceDetail/${invoice.id}")
+                        },
+                        onPrint = {
+                            if (printingInvoiceId == null) {
+                                printingInvoiceId = invoice.id
+                                coroutineScope.launch {
+                                    runCatching {
+                                        loadInvoiceDetail(invoice.id)
+                                    }.onSuccess { detail ->
+                                        printPaymentInvoice(
+                                            context,
+                                            detail.summary,
+                                            detail.paymentMethod
+                                        )
+                                    }.onFailure { error ->
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "Không tải được hóa đơn: ${error.message}",
+                                            android.widget.Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                    printingInvoiceId = null
+                                }
+                            }
+                        }
                     )
                 }
 
@@ -263,7 +296,10 @@ fun InvoiceListScreen(navController: NavController) {
 @Composable
 fun InvoiceCard(
     invoice: InvoiceItem,
-    currencyFormatter: NumberFormat
+    currencyFormatter: NumberFormat,
+    isPrinting: Boolean,
+    onViewDetail: () -> Unit,
+    onPrint: () -> Unit
 ) {
     val (pmLabel, pmColor) =
         if (invoice.paymentMethod == "cash") {
@@ -380,6 +416,43 @@ fun InvoiceCard(
                     fontWeight = FontWeight.Bold,
                     color = Color(0xFF34C759)
                 )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onViewDetail,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Chi tiết")
+                }
+
+                Button(
+                    onClick = onPrint,
+                    enabled = !isPrinting,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF007AFF)
+                    )
+                ) {
+                    if (isPrinting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = Color.White
+                        )
+                    } else {
+                        Icon(Icons.Default.Print, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("In hóa đơn")
+                    }
+                }
             }
         }
     }

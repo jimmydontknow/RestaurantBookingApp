@@ -964,6 +964,93 @@ app.get('/api/menu', async (req, res) => {
 });
 
 // ======================================================
+// IMPORT REFERENCE DATA FROM AN APP BACKUP
+// Booking and invoice history is intentionally not overwritten.
+// ======================================================
+
+app.post('/api/admin/import-reference-data', async (req, res) => {
+    const tables = Array.isArray(req.body.tables) ? req.body.tables : [];
+    const menuItems = Array.isArray(req.body.menuItems) ? req.body.menuItems : [];
+
+    if (tables.length === 0 && menuItems.length === 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'Bản sao không có dữ liệu bàn hoặc thực đơn'
+        });
+    }
+
+    const pool = await getPool();
+    const transaction = new sql.Transaction(pool);
+
+    try {
+        await transaction.begin();
+
+        for (const table of tables) {
+            const tableNumber = String(table.tableNumber || '').trim();
+            if (!tableNumber) continue;
+
+            await new sql.Request(transaction)
+                .input('TableNumber', sql.VarChar(50), tableNumber)
+                .input('Capacity', sql.Int, parseInt(table.capacity, 10) || 4)
+                .input(
+                    'CurrentStatus',
+                    sql.NVarChar(50),
+                    normalizeTableStatus(table.status || 'available')
+                )
+                .query(`
+                    IF EXISTS (SELECT 1 FROM Tables WHERE TableNumber = @TableNumber)
+                        UPDATE Tables
+                        SET Capacity = @Capacity,
+                            CurrentStatus = @CurrentStatus
+                        WHERE TableNumber = @TableNumber;
+                    ELSE
+                        INSERT INTO Tables (TableNumber, Capacity, CurrentStatus)
+                        VALUES (@TableNumber, @Capacity, @CurrentStatus);
+                `);
+        }
+
+        for (const item of menuItems) {
+            const foodName = String(item.foodName || '').trim();
+            if (!foodName) continue;
+
+            await new sql.Request(transaction)
+                .input('FoodName', sql.NVarChar(100), foodName)
+                .input('Price', sql.Decimal(18, 2), Number(item.price) || 0)
+                .input('Category', sql.NVarChar(50), String(item.category || 'Khác'))
+                .input('IsAvailable', sql.Bit, item.isAvailable !== false)
+                .query(`
+                    IF EXISTS (SELECT 1 FROM MenuItems WHERE FoodName = @FoodName)
+                        UPDATE MenuItems
+                        SET Price = @Price,
+                            Category = @Category,
+                            IsAvailable = @IsAvailable
+                        WHERE FoodName = @FoodName;
+                    ELSE
+                        INSERT INTO MenuItems (FoodName, Price, Category, IsAvailable)
+                        VALUES (@FoodName, @Price, @Category, @IsAvailable);
+                `);
+        }
+
+        await transaction.commit();
+        res.json({
+            success: true,
+            message: 'Khôi phục dữ liệu tham chiếu thành công',
+            tableCount: tables.length,
+            menuItemCount: menuItems.length
+        });
+    } catch (error) {
+        if (transaction._aborted !== true) {
+            await transaction.rollback().catch(() => {});
+        }
+        console.error('Import reference data error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Lỗi khôi phục dữ liệu: ' + error.message
+        });
+    }
+});
+
+// ======================================================
 // ADD FOOD TO BOOKING
 // ======================================================
 
@@ -1267,6 +1354,60 @@ app.get('/api/invoices', async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Lỗi hóa đơn: ' + error.message
+        });
+    }
+});
+
+app.get('/api/invoices/:id', async (req, res) => {
+    try {
+        const invoiceId = parseInt(req.params.id, 10);
+        if (!Number.isInteger(invoiceId) || invoiceId <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Mã hóa đơn không hợp lệ'
+            });
+        }
+
+        const pool = await getPool();
+        await ensurePaymentSchema(pool);
+        const result = await pool.request()
+            .input('InvoiceID', sql.Int, invoiceId)
+            .query(`
+                SELECT TOP 1 *
+                FROM Invoices
+                WHERE InvoiceID = @InvoiceID
+            `);
+
+        if (result.recordset.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Không tìm thấy hóa đơn'
+            });
+        }
+
+        const stored = result.recordset[0];
+        const summary = await calculatePaymentSummary(pool, stored.BookingID);
+
+        res.json({
+            success: true,
+            invoice: {
+                ...summary,
+                foodSubtotal: parseFloat(stored.FoodSubtotal || 0),
+                discountPercent: parseFloat(stored.DiscountPercent || 0),
+                discountAmount: parseFloat(stored.DiscountAmount || 0),
+                depositAmount: parseFloat(stored.DepositAmount || 0),
+                amountDue: parseFloat(stored.TotalAmount || 0),
+                invoiceId: stored.InvoiceID.toString(),
+                paidAt: stored.PaidAt,
+                paymentMethod: stored.PaymentMethod || 'cash',
+                note: stored.Note || ''
+            }
+        });
+    } catch (error) {
+        console.error('Invoice detail error:', error);
+        res.status(error.statusCode || 500).json({
+            success: false,
+            message: 'Lỗi tải chi tiết hóa đơn: ' + error.message
         });
     }
 });

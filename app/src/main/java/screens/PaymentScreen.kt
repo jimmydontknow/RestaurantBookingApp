@@ -56,7 +56,7 @@ data class PaymentSummary(
     val paidAt: String = ""
 )
 
-private fun parsePaymentSummary(obj: JSONObject): PaymentSummary {
+internal fun parsePaymentSummary(obj: JSONObject): PaymentSummary {
     val itemArray = obj.optJSONArray("items")
     val foods = mutableListOf<PaymentFoodItem>()
     if (itemArray != null) {
@@ -95,7 +95,7 @@ private fun htmlEscape(value: String): String = value
     .replace(">", "&gt;")
     .replace("\"", "&quot;")
 
-private fun printPaymentInvoice(
+internal fun printPaymentInvoice(
     context: Context,
     summary: PaymentSummary,
     paymentMethod: String

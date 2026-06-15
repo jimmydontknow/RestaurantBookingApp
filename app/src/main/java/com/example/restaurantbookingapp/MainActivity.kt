@@ -1,20 +1,27 @@
 package com.example.restaurantbookingapp
 
+import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.os.Bundle
+import android.os.StrictMode
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -22,10 +29,21 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.example.restaurantbookingapp.screens.*
 import com.example.restaurantbookingapp.ui.theme.RestaurantBookingAppTheme
+import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            StrictMode.setThreadPolicy(
+                StrictMode.ThreadPolicy.Builder()
+                    .detectDiskReads()
+                    .detectDiskWrites()
+                    .detectNetwork()
+                    .penaltyLog()
+                    .build()
+            )
+        }
         setContent {
             RestaurantBookingAppTheme {
                 Surface(
@@ -43,7 +61,29 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun RootNavigation() {
     val navController = rememberNavController()
-    NavHost(navController = navController, startDestination = "login") {
+    NavHost(navController = navController, startDestination = "session_gate") {   //Tự khôi phục phiên đăng nhập bằng SharedPreferences, đồng thời bổ sung đăng xuất đúng cho ba vai trò
+        composable("session_gate") {
+            val context = LocalContext.current
+            LaunchedEffect(Unit) {
+                val role = context
+                    .getSharedPreferences("APP_USERS", Context.MODE_PRIVATE)
+                    .getString("current_role", "")
+                    .orEmpty()
+                val destination = when (role.lowercase()) {
+                    "admin", "manager", "receptionist" -> "admin_main"
+                    "employee", "staff" -> "employee_main"
+                    "customer" -> "customer_main"
+                    else -> "login"
+                }
+                delay(250)
+                navController.navigate(destination) {
+                    popUpTo("session_gate") { inclusive = true }
+                }
+            }
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
+        }
         composable("login") {
             LoginScreen(navController = navController)
         }
@@ -131,7 +171,19 @@ fun AdminMainScreen(rootNavController: NavController) {
             composable("LeTan") { BookingsListScreen(navController = navController, canManageBookings = true, canOrderFood = true) }
             composable("sodo") { SoDoBanScreen(navController = navController) }
             composable("invoices") { InvoiceListScreen(navController = navController) }
-            composable("them") { ThemScreen(navController = navController) }
+            composable("them") {
+                val context = LocalContext.current
+                ThemScreen(
+                    navController = navController,
+                    onLogout = {
+                        clearCurrentSession(context)
+                        rootNavController.navigate("login") {
+                            popUpTo("admin_main") { inclusive = true }
+                        }
+                    }
+                )
+            }
+            composable("data_transfer") { DataTransferScreen(navController = navController) }
             composable("Profile") { ProfileScreen(navController = navController) }
             composable("CreateBooking") { CreateBookingScreen(navController = navController) }
             composable("create_booking") { CreateBookingScreen(navController = navController) }
@@ -142,6 +194,12 @@ fun AdminMainScreen(rootNavController: NavController) {
             composable("Payment/{bookingId}") { backStackEntry ->
                 val bookingId = backStackEntry.arguments?.getString("bookingId") ?: ""
                 PaymentScreen(navController = navController, bookingId = bookingId)
+            }
+            composable("InvoiceDetail/{invoiceId}") { backStackEntry ->
+                InvoiceDetailScreen(
+                    navController = navController,
+                    invoiceId = backStackEntry.arguments?.getString("invoiceId") ?: ""
+                )
             }
         }
     }
@@ -188,6 +246,17 @@ fun EmployeeMainScreen(rootNavController: NavController) {
                         label = { Text("Tra khách") },
                         icon = { Icon(Icons.Default.Search, contentDescription = null) }
                     )
+                    NavigationBarItem(
+                        selected = false,
+                        onClick = {
+                            clearCurrentSession(rootNavController.context)
+                            rootNavController.navigate("login") {
+                                popUpTo("employee_main") { inclusive = true }
+                            }
+                        },
+                        label = { Text("Đăng xuất") },
+                        icon = { Icon(Icons.Default.ExitToApp, contentDescription = null) }
+                    )
                 }
             }
         }
@@ -213,6 +282,12 @@ fun EmployeeMainScreen(rootNavController: NavController) {
                     backStackEntry.arguments?.getString("bookingId") ?: ""
                 )
             }
+            composable("InvoiceDetail/{invoiceId}") { backStackEntry ->
+                InvoiceDetailScreen(
+                    navController = navController,
+                    invoiceId = backStackEntry.arguments?.getString("invoiceId") ?: ""
+                )
+            }
             composable("menu/{bookingId}") { backStackEntry ->
                 val bookingId = backStackEntry.arguments
                     ?.getString("bookingId")
@@ -224,4 +299,14 @@ fun EmployeeMainScreen(rootNavController: NavController) {
             }
         }
     }
+}
+
+private fun clearCurrentSession(context: Context) {
+    context.getSharedPreferences("APP_USERS", Context.MODE_PRIVATE)
+        .edit()
+        .remove("current_username")
+        .remove("current_fullName")
+        .remove("current_phoneNumber")
+        .remove("current_role")
+        .apply()
 }

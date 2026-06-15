@@ -17,6 +17,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -69,6 +73,27 @@ fun CustomerMainScreen(rootNavController: NavController) {
                     onClick = { navController.navigate("customer_tables") },
                     label = { Text("Sơ đồ bàn") },
                     icon = { Icon(Icons.Default.Home, contentDescription = null) }
+                )
+
+                NavigationBarItem(
+                    selected = false,
+                    onClick = {
+                        val prefs = rootNavController.context.getSharedPreferences(
+                            "APP_USERS",
+                            Context.MODE_PRIVATE
+                        )
+                        prefs.edit()
+                            .remove("current_username")
+                            .remove("current_fullName")
+                            .remove("current_phoneNumber")
+                            .remove("current_role")
+                            .apply()
+                        rootNavController.navigate("login") {
+                            popUpTo("customer_main") { inclusive = true }
+                        }
+                    },
+                    label = { Text("Đăng xuất") },
+                    icon = { Icon(Icons.Default.ExitToApp, contentDescription = null) }
                 )
             }
         }
@@ -131,17 +156,17 @@ fun CustomerBookingScreen(
     val savedPhone = prefs.getString("current_phoneNumber", "") ?: ""
     val loggedInUsername = prefs.getString("current_username", "") ?: ""
 
-    var isWalkIn by remember { mutableStateOf(savedName.isBlank() && savedPhone.isBlank()) }
-    var guestName by remember { mutableStateOf(savedName) }
-    var phoneNumber by remember { mutableStateOf(savedPhone) }
-    var memberText by remember { mutableStateOf("Nhập SĐT để kiểm tra khách cũ") }
-    var discountPercent by remember { mutableStateOf(0.0) }
-    var guestCount by remember { mutableStateOf("") }
-    var selectedZone by remember { mutableStateOf("A") }
-    var bookingDate by remember { mutableStateOf("") }
-    var bookingTime by remember { mutableStateOf("") }
-    var note by remember { mutableStateOf("") }
-    var depositAmount by remember { mutableStateOf("200000") }
+    var isWalkIn by rememberSaveable { mutableStateOf(savedName.isBlank() && savedPhone.isBlank()) }  //Form đặt bàn khách giữ tên, SĐT, ngày giờ, khu vực, bàn và món đã chọn khi xoay màn hình bằng
+    var guestName by rememberSaveable { mutableStateOf(savedName) }
+    var phoneNumber by rememberSaveable { mutableStateOf(savedPhone) }
+    var memberText by rememberSaveable { mutableStateOf("Nhập SĐT để kiểm tra khách cũ") }
+    var discountPercent by rememberSaveable { mutableStateOf(0.0) }
+    var guestCount by rememberSaveable { mutableStateOf("") }
+    var selectedZone by rememberSaveable { mutableStateOf("A") }
+    var bookingDate by rememberSaveable { mutableStateOf("") }
+    var bookingTime by rememberSaveable { mutableStateOf("") }
+    var note by rememberSaveable { mutableStateOf("") }
+    var depositAmount by rememberSaveable { mutableStateOf("200000") }
     var expandedTime by remember { mutableStateOf(false) }
     var expandedZone by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(false) }
@@ -149,9 +174,32 @@ fun CustomerBookingScreen(
     var isLoadingMenu by remember { mutableStateOf(true) }
 
     val allTables = remember { mutableStateListOf<TableData>() }
-    val selectedTables = remember { mutableStateListOf<TableData>() }
+    val selectedTableIdsSaver = Saver<SnapshotStateList<String>, ArrayList<String>>(
+        save = { ArrayList(it) },
+        restore = { it.toMutableStateList() }
+    )
+    val selectedTableIds = rememberSaveable(saver = selectedTableIdsSaver) {
+        mutableStateListOf<String>()
+    }
     val foods = remember { mutableStateListOf<CustomerMenuFood>() }
-    val quantities = remember { mutableStateMapOf<Int, Int>() }
+    val quantitiesSaver = Saver<SnapshotStateMap<Int, Int>, ArrayList<String>>(
+        save = { values ->
+            ArrayList(values.map { (foodId, quantity) -> "$foodId:$quantity" })
+        },
+        restore = { values ->
+            mutableStateMapOf<Int, Int>().apply {
+                values.forEach { item ->
+                    val parts = item.split(":", limit = 2)
+                    val foodId = parts.getOrNull(0)?.toIntOrNull()
+                    val quantity = parts.getOrNull(1)?.toIntOrNull()
+                    if (foodId != null && quantity != null) put(foodId, quantity)
+                }
+            }
+        }
+    )
+    val quantities = rememberSaveable(saver = quantitiesSaver) {
+        mutableStateMapOf<Int, Int>()
+    }
     val currencyFormatter = NumberFormat.getCurrencyInstance(Locale("vi", "VN"))
     val timeSlots = listOf("10:00", "10:30", "11:00", "11:30", "12:00", "12:30", "13:00", "13:30", "17:00", "17:30", "18:00", "18:30", "19:00", "19:30", "20:00", "20:30", "21:00")
 
@@ -160,6 +208,7 @@ fun CustomerBookingScreen(
     val tablesNeeded = if (guestCountInt > 0) kotlin.math.ceil(guestCountInt.toDouble() / maxPerTable).toInt() else 0
     val isOverLimit = tablesNeeded > 3
     val zoneTables = allTables.filter { it.zone == selectedZone }
+    val selectedTables = allTables.filter { it.id in selectedTableIds }
     val selectedFoodCount = quantities.values.sum()
     val menuTotal = foods.sumOf { it.price * (quantities[it.foodId] ?: 0) }
     val discountAmount = menuTotal * discountPercent / 100.0
@@ -343,12 +392,12 @@ fun CustomerBookingScreen(
                 Box(modifier = Modifier.fillMaxWidth()) {
                     OutlinedTextField(value = if (selectedZone == "A") "Khu A — Phòng lạnh" else "Khu B — Ngoài trời", onValueChange = {}, readOnly = true, label = { Text("Khu vực") }, trailingIcon = { Icon(Icons.Default.ArrowDropDown, contentDescription = null, modifier = Modifier.clickable { expandedZone = true }) }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp))
                     DropdownMenu(expanded = expandedZone, onDismissRequest = { expandedZone = false }) {
-                        DropdownMenuItem(text = { Text("Khu A — Phòng lạnh") }, onClick = { selectedZone = "A"; selectedTables.clear(); expandedZone = false })
-                        DropdownMenuItem(text = { Text("Khu B — Ngoài trời") }, onClick = { selectedZone = "B"; selectedTables.clear(); expandedZone = false })
+                        DropdownMenuItem(text = { Text("Khu A — Phòng lạnh") }, onClick = { selectedZone = "A"; selectedTableIds.clear(); expandedZone = false })
+                        DropdownMenuItem(text = { Text("Khu B — Ngoài trời") }, onClick = { selectedZone = "B"; selectedTableIds.clear(); expandedZone = false })
                     }
                 }
             }
-            item { OutlinedTextField(value = guestCount, onValueChange = { if (it.all { c -> c.isDigit() }) { guestCount = it; selectedTables.clear() } }, label = { Text("Số lượng khách") }, isError = isOverLimit, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) }
+            item { OutlinedTextField(value = guestCount, onValueChange = { if (it.all { c -> c.isDigit() }) { guestCount = it; selectedTableIds.clear() } }, label = { Text("Số lượng khách") }, isError = isOverLimit, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) }
             item {
                 Card(colors = CardDefaults.cardColors(containerColor = Color.White), shape = RoundedCornerShape(8.dp)) {
                     Column(modifier = Modifier.padding(12.dp)) {
@@ -372,8 +421,8 @@ fun CustomerBookingScreen(
                                     }
                                     val fg = if (isSelected) Color.White else Color.Black
                                     Box(modifier = Modifier.fillMaxWidth().height(68.dp).background(bg, RoundedCornerShape(8.dp)).clickable(enabled = canPick && tablesNeeded > 0) {
-                                        if (isSelected) selectedTables.removeAll { it.id == table.id }
-                                        else if (selectedTables.size < tablesNeeded) selectedTables.add(table)
+                                        if (isSelected) selectedTableIds.remove(table.id)
+                                        else if (selectedTables.size < tablesNeeded) selectedTableIds.add(table.id)
                                         else Toast.makeText(context, "Đã đủ $tablesNeeded bàn", Toast.LENGTH_SHORT).show()
                                     }, contentAlignment = Alignment.Center) {
                                         Column(horizontalAlignment = Alignment.CenterHorizontally) {

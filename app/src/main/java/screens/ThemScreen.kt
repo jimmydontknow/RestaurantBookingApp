@@ -11,6 +11,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.ExitToApp
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -27,7 +29,10 @@ import com.example.restaurantbookingapp.ui.theme.BackgroundGray
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ThemScreen(navController: NavController) {
+fun ThemScreen(
+    navController: NavController,
+    onLogout: () -> Unit = {}
+) {
     val context = LocalContext.current
     val scrollState = rememberScrollState()
 
@@ -65,8 +70,14 @@ fun ThemScreen(navController: NavController) {
             MenuItemRow(title = "Quản lý nhân sự", icon = Icons.Default.AccountCircle) {
                 Toast.makeText(context, "Mở Danh sách nhân viên", Toast.LENGTH_SHORT).show()
             }
+            MenuItemRow(title = "Sao lưu và khôi phục dữ liệu", icon = Icons.Default.Storage) {
+                navController.navigate("data_transfer")
+            }
             MenuItemRow(title = "Thông tin đồ án", icon = Icons.Default.Info) {
                 Toast.makeText(context, "Đồ án Quản Lý Đặt Bàn Nhà Hàng v1.0", Toast.LENGTH_LONG).show()
+            }
+            MenuItemRow(title = "Đăng xuất", icon = Icons.Default.ExitToApp) {
+                onLogout()
             }
         }
     }
