@@ -948,6 +948,9 @@ fun CustomerMenuScreen(navController: NavController, bookingId: Int) {
 
     fun submitOrder() {
         isSubmitting = true
+        val selectedOrderItems = selectedFoods.map { food ->
+            food to (quantities[food.foodId] ?: 0)
+        }
         coroutineScope.launch(Dispatchers.IO) {
             var conn: HttpURLConnection? = null
             var ok = false
@@ -960,7 +963,7 @@ fun CustomerMenuScreen(navController: NavController, bookingId: Int) {
                 conn?.disconnect()
             }
             if (ok) {
-                for (food in selectedFoods) {
+                for ((food, quantity) in selectedOrderItems) {
                     conn = null
                     try {
                         conn = URL("http://10.0.2.2:3001/api/order-items/add").openConnection() as HttpURLConnection
@@ -970,7 +973,7 @@ fun CustomerMenuScreen(navController: NavController, bookingId: Int) {
                         val body = JSONObject().apply {
                             put("bookingId", bookingId)
                             put("foodId", food.foodId)
-                            put("quantity", quantities[food.foodId] ?: 0)
+                            put("quantity", quantity)
                             put("unitPrice", food.price)
                         }.toString()
                         conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
@@ -982,7 +985,7 @@ fun CustomerMenuScreen(navController: NavController, bookingId: Int) {
             }
             withContext(Dispatchers.Main) {
                 isSubmitting = false
-                if (ok && successCount == selectedFoods.size) {
+                if (ok && successCount == selectedOrderItems.size) {
                     Toast.makeText(context, "Đã lưu món đã gọi", Toast.LENGTH_SHORT).show()
                     navController.popBackStack()
                 } else Toast.makeText(context, "Một số món chưa lưu được", Toast.LENGTH_LONG).show()

@@ -195,7 +195,7 @@ fun CreateBookingScreen(navController: NavController) {
         }
     }
     // --- HÀM TẠO ĐẶT BÀN ---
-    suspend fun createBooking(): Boolean {
+    suspend fun createBooking(): Int? {
         return withContext(Dispatchers.IO) {
             var conn: HttpURLConnection? = null
             try {
@@ -222,10 +222,15 @@ fun CreateBookingScreen(navController: NavController) {
                 }
 
                 val code = conn.responseCode
-                code == HttpURLConnection.HTTP_OK || code == HttpURLConnection.HTTP_CREATED
+                if (code == HttpURLConnection.HTTP_OK || code == HttpURLConnection.HTTP_CREATED) {
+                    val responseText = conn.inputStream.bufferedReader().use { it.readText() }
+                    JSONObject(responseText).optInt("bookingId").takeIf { it > 0 }
+                } else {
+                    null
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
-                false
+                null
             } finally {
                 conn?.disconnect()
             }
@@ -233,6 +238,37 @@ fun CreateBookingScreen(navController: NavController) {
     }
 
     // Tải bàn khi mở màn hình
+    fun submitBooking(openMenuAfterCreate: Boolean) {
+        when {
+            guestName.trim().isEmpty() ->
+                Toast.makeText(context, "Vui lòng nhập tên khách hàng!", Toast.LENGTH_SHORT).show()
+            phoneNumber.trim().isEmpty() ->
+                Toast.makeText(context, "Vui lòng nhập số điện thoại!", Toast.LENGTH_SHORT).show()
+            selectedTables.isEmpty() ->
+                Toast.makeText(context, "Vui lòng chọn ít nhất 1 bàn!", Toast.LENGTH_SHORT).show()
+            else -> {
+                coroutineScope.launch {
+                    val bookingId = createBooking()
+                    if (bookingId != null) {
+                        markTablesAsBooked(selectedTables.map { it.id })
+                        Toast.makeText(
+                            context,
+                            "Đặt bàn thành công! ${selectedTables.size} bàn đã được cập nhật trạng thái.",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        if (openMenuAfterCreate) {
+                            navController.navigate("menu/$bookingId")
+                        } else {
+                            navController.popBackStack()
+                        }
+                    } else {
+                        Toast.makeText(context, "Lỗi tạo đặt bàn, thử lại!", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+    }
+
     LaunchedEffect(Unit) { loadTables() }
 
     // =========================================================================
@@ -577,6 +613,21 @@ fun CreateBookingScreen(navController: NavController) {
 
             Spacer(modifier = Modifier.height(8.dp))
 
+            OutlinedButton(
+                onClick = { submitBooking(openMenuAfterCreate = true) },
+                modifier = Modifier.fillMaxWidth().height(50.dp),
+                shape = RoundedCornerShape(10.dp),
+                enabled = selectedTables.isNotEmpty(),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFF9500))
+            ) {
+                Text(
+                    "Tạo đặt bàn & gọi món",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFFFF9500)
+                )
+            }
+
             // NÚT XÁC NHẬN TẠO ĐẶT BÀN
             Button(
                 onClick = {
@@ -590,8 +641,8 @@ fun CreateBookingScreen(navController: NavController) {
                         else -> {
                             coroutineScope.launch {
                                 // Bước 1: Tạo booking
-                                val success = createBooking()
-                                if (success) {
+                                val bookingId = createBooking()
+                                if (bookingId != null) {
                                     // Bước 2: Cập nhật trạng thái các bàn đã chọn → "booked"
                                     markTablesAsBooked(selectedTables.map { it.id })
                                     Toast.makeText(

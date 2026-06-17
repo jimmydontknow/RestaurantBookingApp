@@ -195,6 +195,19 @@ fun AdminMainScreen(rootNavController: NavController) {
                 val bookingId = backStackEntry.arguments?.getString("bookingId") ?: ""
                 PaymentScreen(navController = navController, bookingId = bookingId)
             }
+            composable("menu/{bookingId}") { backStackEntry ->
+                val bookingId = backStackEntry.arguments
+                    ?.getString("bookingId")
+                    ?.toIntOrNull()
+                    ?: 0
+                if (bookingId > 0) {
+                    CustomerMenuScreen(navController, bookingId)
+                } else {
+                    LaunchedEffect(Unit) {
+                        navController.popBackStack()
+                    }
+                }
+            }
             composable("InvoiceDetail/{invoiceId}") { backStackEntry ->
                 InvoiceDetailScreen(
                     navController = navController,
