@@ -1,0 +1,156 @@
+package com.example.restaurantbookingapp.screens
+
+import android.app.Application
+import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
+import org.json.JSONArray
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URLEncoder
+import java.net.URL
+import java.util.concurrent.Executors
+
+data class CustomerLookupResult(
+    val name: String,
+    val phone: String,
+    val visitCount: Int,
+    val totalSpent: Double,
+    val discountPercent: Double
+)
+
+class StaffCustomerLookupViewModel(
+    application: Application,
+    private val savedStateHandle: SavedStateHandle
+) : AndroidViewModel(application) {
+    private val executor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val preferences = application.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+
+    var query by mutableStateOf(
+        savedStateHandle[KEY_QUERY] ?: preferences.getString(KEY_QUERY, "").orEmpty()
+    )
+        private set
+    var isLoading by mutableStateOf(false)
+        private set
+    var hasSearched by mutableStateOf(
+        savedStateHandle[KEY_HAS_SEARCHED] ?: preferences.getBoolean(KEY_HAS_SEARCHED, false)
+    )
+        private set
+    var results by mutableStateOf(
+        parseResults(
+            savedStateHandle[KEY_RESULTS]
+                ?: preferences.getString(KEY_RESULTS, "").orEmpty()
+        )
+    )
+        private set
+    var message by mutableStateOf<String?>(null)
+        private set
+
+    fun updateQuery(value: String) {
+        query = value
+        savedStateHandle[KEY_QUERY] = value
+        preferences.edit().putString(KEY_QUERY, value).apply()
+    }
+
+    fun lookup() {
+        val keyword = query.trim()
+        if (keyword.isBlank()) {
+            message = "Vui lòng nhập tên hoặc số điện thoại"
+            return
+        }
+
+        isLoading = true
+        executor.execute {
+            var connection: HttpURLConnection? = null
+            runCatching {
+                val encoded = URLEncoder.encode(keyword, "UTF-8")
+                connection = URL("http://10.0.2.2:3001/api/customers/lookup?q=$encoded")
+                    .openConnection() as HttpURLConnection
+                connection?.apply {
+                    requestMethod = "GET"
+                    connectTimeout = 5000
+                    readTimeout = 5000
+                }
+                val code = connection?.responseCode ?: 500
+                val body = (if (code in 200..299) connection?.inputStream else connection?.errorStream)
+                    ?.bufferedReader()?.use { it.readText() }.orEmpty()
+                if (code !in 200..299) {
+                    error(runCatching { JSONObject(body).optString("message") }.getOrNull().orEmpty()
+                        .ifBlank { "Không tra cứu được khách hàng" })
+                }
+                body
+            }.onSuccess { body ->
+                mainHandler.post {
+                    val parsed = parseResponse(body)
+                    results = parsed
+                    hasSearched = true
+                    isLoading = false
+                    savedStateHandle[KEY_RESULTS] = resultsToJson(parsed)
+                    savedStateHandle[KEY_HAS_SEARCHED] = true
+                    preferences.edit()
+                        .putString(KEY_RESULTS, resultsToJson(parsed))
+                        .putBoolean(KEY_HAS_SEARCHED, true)
+                        .apply()
+                }
+            }.onFailure { error ->
+                mainHandler.post {
+                    isLoading = false
+                    message = error.localizedMessage ?: "Không tra cứu được khách hàng"
+                }
+            }
+            connection?.disconnect()
+        }
+    }
+
+    fun consumeMessage() {
+        message = null
+    }
+
+    override fun onCleared() {
+        executor.shutdownNow()
+        super.onCleared()
+    }
+
+    private fun parseResponse(body: String): List<CustomerLookupResult> {
+        val customers = JSONObject(body).optJSONArray("customers") ?: JSONArray()
+        return List(customers.length()) { index -> customers.getJSONObject(index).toResult() }
+    }
+
+    private fun JSONObject.toResult() = CustomerLookupResult(
+        name = optString("name"),
+        phone = optString("phone"),
+        visitCount = optInt("visitCount"),
+        totalSpent = optDouble("totalSpent"),
+        discountPercent = optDouble("discountPercent")
+    )
+
+    private fun resultsToJson(items: List<CustomerLookupResult>): String = JSONArray().apply {
+        items.forEach { item ->
+            put(JSONObject().apply {
+                put("name", item.name)
+                put("phone", item.phone)
+                put("visitCount", item.visitCount)
+                put("totalSpent", item.totalSpent)
+                put("discountPercent", item.discountPercent)
+            })
+        }
+    }.toString()
+
+    private fun parseResults(raw: String): List<CustomerLookupResult> = runCatching {
+        val array = JSONArray(raw)
+        List(array.length()) { index -> array.getJSONObject(index).toResult() }
+    }.getOrDefault(emptyList())
+
+    companion object {
+        private const val PREFERENCES_NAME = "staff_customer_lookup"
+        private const val KEY_QUERY = "customer_lookup_query"
+        private const val KEY_RESULTS = "customer_lookup_results"
+        private const val KEY_HAS_SEARCHED = "customer_lookup_has_searched"
+    }
+}

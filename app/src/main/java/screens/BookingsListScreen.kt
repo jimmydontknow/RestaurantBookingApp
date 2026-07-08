@@ -13,6 +13,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -35,10 +36,17 @@ fun BookingsListScreen(
     canManageBookings: Boolean = true,
     canOrderFood: Boolean = true
 ) {
-    val bookingList = remember { mutableStateListOf<BookingItem>() }
-    var searchQuery by remember { mutableStateOf("") }
-    var selectedFilter by remember { mutableStateOf("Tất cả") }
     val context = LocalContext.current
+    val searchPreferences = remember {
+        context.getSharedPreferences("bookings_list_search", android.content.Context.MODE_PRIVATE)
+    }
+    val bookingList = remember { mutableStateListOf<BookingItem>() }
+    var searchQuery by rememberSaveable {
+        mutableStateOf(searchPreferences.getString("query", "").orEmpty())
+    }
+    var selectedFilter by rememberSaveable {
+        mutableStateOf(searchPreferences.getString("filter", "Tất cả").orEmpty())
+    }
     val coroutineScope = rememberCoroutineScope()
 
     // Trạng thái dialog tùy chọn (nhấn giữ card)
@@ -335,7 +343,10 @@ fun BookingsListScreen(
 
             OutlinedTextField(
                 value = searchQuery,
-                onValueChange = { searchQuery = it },
+                onValueChange = { value ->
+                    searchQuery = value
+                    searchPreferences.edit().putString("query", value).apply()
+                },
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                 placeholder = { Text("Tìm mã, tên khách, SĐT...") },
                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
@@ -356,7 +367,10 @@ fun BookingsListScreen(
                 listOf("Tất cả", "Chờ xếp bàn", "Đang phục vụ", "Đã rời", "Đã hủy").forEach { filter ->
                     val isSelected = selectedFilter == filter
                     Button(
-                        onClick = { selectedFilter = filter },
+                        onClick = {
+                            selectedFilter = filter
+                            searchPreferences.edit().putString("filter", filter).apply()
+                        },
                         colors = ButtonDefaults.buttonColors(
                             containerColor = if (isSelected) Color(0xFF007AFF) else Color(0xFFE5E5EA)
                         ),

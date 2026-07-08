@@ -184,6 +184,7 @@ fun AdminMainScreen(rootNavController: NavController) {
                 )
             }
             composable("data_transfer") { DataTransferScreen(navController = navController) }
+            composable("restaurant_utilities") { RestaurantUtilitiesScreen(navController = navController) }
             composable("Profile") { ProfileScreen(navController = navController) }
             composable("CreateBooking") { CreateBookingScreen(navController = navController) }
             composable("create_booking") { CreateBookingScreen(navController = navController) }

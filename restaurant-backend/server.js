@@ -216,40 +216,57 @@ app.post('/api/admin/reconcile-statuses', async (req, res) => {
 app.get('/api/customers/lookup', async (req, res) => {
     try {
         const phone = (req.query.phone || '').toString().trim();
-        if (!phone) {
-            return res.status(400).json({ success: false, message: 'Thiếu số điện thoại' });
+        const keyword = (req.query.q || phone).toString().trim();
+        if (!keyword) {
+            return res.status(400).json({ success: false, message: 'Thiếu tên hoặc số điện thoại' });
         }
 
         const pool = await getPool();
         const result = await pool.request()
-            .input('Phone', sql.VarChar, phone)
+            .input('Keyword', sql.NVarChar, keyword)
             .query(`
                 SELECT
+                    ISNULL(GuestName, '') AS GuestName,
+                    ISNULL(GuestPhone, '') AS GuestPhone,
                     COUNT(*) AS VisitCount,
                     ISNULL(SUM(TotalAmount), 0) AS TotalSpent
                 FROM Invoices
-                WHERE GuestPhone = @Phone
+                WHERE GuestPhone = @Keyword
+                   OR GuestName LIKE N'%' + @Keyword + N'%'
+                GROUP BY GuestName, GuestPhone
+                ORDER BY MAX(PaidAt) DESC
             `);
 
-        const row = result.recordset[0] || {};
-        const visitCount = parseInt(row.VisitCount || 0);
-        const totalSpent = parseFloat(row.TotalSpent || 0);
-        let discountPercent = 0;
+        const customers = result.recordset.map(row => {
+            const visitCount = parseInt(row.VisitCount || 0);
+            const totalSpent = parseFloat(row.TotalSpent || 0);
+            let discountPercent = 0;
+            if (totalSpent >= 5000000) discountPercent = 7;
+            else if (totalSpent >= 2000000) discountPercent = 5;
+            else if (visitCount > 0 || totalSpent > 0) discountPercent = 2;
+            return {
+                name: row.GuestName || '',
+                phone: row.GuestPhone || '',
+                visitCount,
+                totalSpent,
+                discountPercent
+            };
+        });
 
-        if (totalSpent >= 5000000) {
-            discountPercent = 7;
-        } else if (totalSpent >= 2000000) {
-            discountPercent = 5;
-        } else if (visitCount > 0 || totalSpent > 0) {
-            discountPercent = 2;
-        }
+        const exactPhoneCustomer = customers.find(customer => customer.phone === phone);
+        const primaryCustomer = exactPhoneCustomer || customers[0] || {
+            visitCount: 0,
+            totalSpent: 0,
+            discountPercent: 0
+        };
 
         res.json({
             success: true,
-            found: visitCount > 0 || totalSpent > 0,
-            visitCount,
-            totalSpent,
-            discountPercent
+            found: customers.length > 0,
+            visitCount: primaryCustomer.visitCount,
+            totalSpent: primaryCustomer.totalSpent,
+            discountPercent: primaryCustomer.discountPercent,
+            customers
         });
     } catch (error) {
         console.error(error);

@@ -37,7 +37,7 @@ fun TableMapScreen(navController: NavController) {
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             try {
-                val url = URL("http://10.0.2.2:3001/api/tables-layout")
+                val url = URL("http://10.0.2.2:3001/api/tables")
                 val conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"
                 if (conn.responseCode == HttpURLConnection.HTTP_OK) {
@@ -46,12 +46,17 @@ fun TableMapScreen(navController: NavController) {
                     val fetchedTables = mutableListOf<TableMapItem>()
                     for (i in 0 until jsonArray.length()) {
                         val obj = jsonArray.getJSONObject(i)
+                        val normalizedStatus = obj.optString("status", "available")
                         fetchedTables.add(
                             TableMapItem(
                                 id = obj.getString("id"),
-                                name = obj.getString("name"),
-                                status = obj.getString("status"),
-                                type = obj.getString("type") // Bóc tách trường phân loại "đơn" / "ghép"
+                                name = "BÀN ${obj.optString("tableNumber")}",
+                                status = when (normalizedStatus) {
+                                    "occupied" -> "Đang dùng"
+                                    "booked" -> "Đang đặt"
+                                    else -> "Bàn trống"
+                                },
+                                type = if (obj.optInt("capacity", 1) > 10) "ghép" else "đơn"
                             )
                         )
                     }
