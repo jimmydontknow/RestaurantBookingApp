@@ -6,6 +6,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js",
+    "dev": "powershell -ExecutionPolicy Bypass -NoProfile -Command \"Get-NetTCPConnection -LocalPort 3001 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id `$_.OwningProcess -Force }\"; node server.js",
+    "kill-port": "powershell -ExecutionPolicy Bypass -NoProfile -Command \"`$conns = Get-NetTCPConnection -LocalPort 3001 -ErrorAction SilentlyContinue; if (`$conns) { `$conns | ForEach-Object { Stop-Process -Id `$_.OwningProcess -Force }; Write-Host 'Da giai phong port 3001' } else { Write-Host 'Port 3001 dang trong' }\"",
     "health": "powershell -NoProfile -Command \"Invoke-RestMethod http://localhost:3001/api/health\""
   },
   "keywords": [],
@@ -13,9 +15,11 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
     "mssql": "^12.5.4"
   }
 }

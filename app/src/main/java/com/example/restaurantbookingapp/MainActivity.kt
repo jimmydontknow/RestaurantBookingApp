@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.os.StrictMode
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import com.example.restaurantbookingapp.network.TokenManager
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -34,6 +35,10 @@ import kotlinx.coroutines.delay
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Khởi tạo TokenManager — phải gọi trước bất kỳ ApiClient call nào
+        TokenManager.init(this)
+
         if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
             StrictMode.setThreadPolicy(
                 StrictMode.ThreadPolicy.Builder()
@@ -63,12 +68,9 @@ fun RootNavigation() {
     val navController = rememberNavController()
     NavHost(navController = navController, startDestination = "session_gate") {   //Tự khôi phục phiên đăng nhập bằng SharedPreferences, đồng thời bổ sung đăng xuất đúng cho ba vai trò
         composable("session_gate") {
-            val context = LocalContext.current
             LaunchedEffect(Unit) {
-                val role = context
-                    .getSharedPreferences("APP_USERS", Context.MODE_PRIVATE)
-                    .getString("current_role", "")
-                    .orEmpty()
+                // Đọc role từ EncryptedSharedPreferences (TokenManager)
+                val role = TokenManager.getRole().orEmpty()
                 val destination = when (role.lowercase()) {
                     "admin", "manager", "receptionist" -> "admin_main"
                     "employee", "staff" -> "employee_main"
@@ -315,12 +317,8 @@ fun EmployeeMainScreen(rootNavController: NavController) {
     }
 }
 
+@Suppress("UNUSED_PARAMETER")
 private fun clearCurrentSession(context: Context) {
-    context.getSharedPreferences("APP_USERS", Context.MODE_PRIVATE)
-        .edit()
-        .remove("current_username")
-        .remove("current_fullName")
-        .remove("current_phoneNumber")
-        .remove("current_role")
-        .apply()
+    // Xóa JWT token và thông tin user khỏi EncryptedSharedPreferences
+    TokenManager.clearSession()
 }

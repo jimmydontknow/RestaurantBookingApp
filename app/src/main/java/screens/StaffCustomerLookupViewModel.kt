@@ -21,7 +21,21 @@ data class CustomerLookupResult(
     val phone: String,
     val visitCount: Int,
     val totalSpent: Double,
-    val discountPercent: Double
+    val discountPercent: Double,
+    val invoices: List<CustomerInvoiceResult> = emptyList()
+)
+
+data class CustomerInvoiceResult(
+    val id: String,
+    val bookingCode: String,
+    val tableSummary: String,
+    val foodSubtotal: Double,
+    val discountAmount: Double,
+    val depositAmount: Double,
+    val totalAmount: Double,
+    val paymentMethod: String,
+    val paidAt: String,
+    val note: String
 )
 
 class StaffCustomerLookupViewModel(
@@ -118,8 +132,17 @@ class StaffCustomerLookupViewModel(
     }
 
     private fun parseResponse(body: String): List<CustomerLookupResult> {
-        val customers = JSONObject(body).optJSONArray("customers") ?: JSONArray()
-        return List(customers.length()) { index -> customers.getJSONObject(index).toResult() }
+        val root = JSONObject(body)
+        val customers = root.optJSONArray("customers") ?: JSONArray()
+        val topLevelInvoices = root.optJSONArray("invoices") ?: JSONArray()
+        return List(customers.length()) { index ->
+            val customer = customers.getJSONObject(index).toResult()
+            if (customer.invoices.isEmpty() && customers.length() == 1 && topLevelInvoices.length() > 0) {
+                customer.copy(invoices = topLevelInvoices.toInvoiceList())
+            } else {
+                customer
+            }
+        }
     }
 
     private fun JSONObject.toResult() = CustomerLookupResult(
@@ -127,7 +150,39 @@ class StaffCustomerLookupViewModel(
         phone = optString("phone"),
         visitCount = optInt("visitCount"),
         totalSpent = optDouble("totalSpent"),
-        discountPercent = optDouble("discountPercent")
+        discountPercent = optDouble("discountPercent"),
+        invoices = (optJSONArray("invoices") ?: JSONArray()).toInvoiceList()
+    )
+
+    private fun JSONArray.toInvoiceList(): List<CustomerInvoiceResult> =
+        List(length()) { index ->
+            optJSONObject(index)?.toInvoiceResult() ?: CustomerInvoiceResult(
+                id = "",
+                bookingCode = "",
+                tableSummary = "",
+                foodSubtotal = 0.0,
+                discountAmount = 0.0,
+                depositAmount = 0.0,
+                totalAmount = 0.0,
+                paymentMethod = "",
+                paidAt = "",
+                note = ""
+            )
+        }
+
+    private fun JSONObject.toInvoiceResult() = CustomerInvoiceResult(
+        id = optString("id").ifBlank { optString("invoiceId") },
+        bookingCode = optString("bookingCode"),
+        tableSummary = optString("tableSummary"),
+        foodSubtotal = optDouble("foodSubtotal"),
+        discountAmount = optDouble("discountAmount"),
+        depositAmount = optDouble("depositAmount"),
+        totalAmount = optDouble("totalAmount").let { total ->
+            if (total > 0.0) total else optDouble("amountDue")
+        },
+        paymentMethod = optString("paymentMethod"),
+        paidAt = optString("paidAt"),
+        note = optString("note")
     )
 
     private fun resultsToJson(items: List<CustomerLookupResult>): String = JSONArray().apply {
@@ -138,6 +193,22 @@ class StaffCustomerLookupViewModel(
                 put("visitCount", item.visitCount)
                 put("totalSpent", item.totalSpent)
                 put("discountPercent", item.discountPercent)
+                put("invoices", JSONArray().apply {
+                    item.invoices.forEach { invoice ->
+                        put(JSONObject().apply {
+                            put("id", invoice.id)
+                            put("bookingCode", invoice.bookingCode)
+                            put("tableSummary", invoice.tableSummary)
+                            put("foodSubtotal", invoice.foodSubtotal)
+                            put("discountAmount", invoice.discountAmount)
+                            put("depositAmount", invoice.depositAmount)
+                            put("totalAmount", invoice.totalAmount)
+                            put("paymentMethod", invoice.paymentMethod)
+                            put("paidAt", invoice.paidAt)
+                            put("note", invoice.note)
+                        })
+                    }
+                })
             })
         }
     }.toString()

@@ -1,4 +1,4 @@
-package com.example.restaurantbookingapp.screens
+﻿package com.example.restaurantbookingapp.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -494,3 +494,4 @@ fun formatPaidAt(paidAt: String): String {
         date
     }
 }
+

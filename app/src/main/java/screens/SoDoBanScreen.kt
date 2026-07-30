@@ -22,6 +22,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
+import com.example.restaurantbookingapp.network.ApiConfig
+import com.example.restaurantbookingapp.network.TokenManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -98,7 +100,7 @@ fun SoDoBanScreen(navController: NavController) {
             try {
 
                 val url =
-                    URL("http://10.0.2.2:3001/api/tables")
+                    URL(ApiConfig.endpoint("/api/tables"))
 
                 conn =
                     url.openConnection()
@@ -107,6 +109,11 @@ fun SoDoBanScreen(navController: NavController) {
                 conn.requestMethod = "GET"
                 conn.connectTimeout = 5000
                 conn.readTimeout = 5000
+
+                val token = TokenManager.getToken()
+                if (!token.isNullOrBlank()) {
+                    conn.setRequestProperty("Authorization", "Bearer $token")
+                }
 
                 if (
                     conn.responseCode ==
@@ -148,27 +155,25 @@ fun SoDoBanScreen(navController: NavController) {
                             else -> "available"
                         }
 
-                        fetched.add(
+                        val tableNumUpper = tableNum.trim().uppercase()
+                        val parsedZone = obj.optString("zone", "").uppercase()
+                        val finalZone = when {
+                            parsedZone == "A" || parsedZone == "B" -> parsedZone
+                            tableNumUpper.startsWith("A") -> "A"
+                            tableNumUpper.startsWith("B") -> "B"
+                            else -> {
+                                val num = tableNumUpper.filter { it.isDigit() }.toIntOrNull() ?: 1
+                                if (num <= 6) "A" else "B"
+                            }
+                        }
 
+                        fetched.add(
                             TableData(
                                 id = obj.optString("id", obj.optString("TableID", "")),
-
                                 tableNumber = tableNum,
-
-                                tableName = "BÀN $tableNum",
-
+                                tableName = if (tableNumUpper.startsWith("BÀN")) tableNumUpper else "BÀN $tableNum",
                                 status = normalizedStatus,
-
-                                zone =
-                                    obj.optString(
-                                        "zone",
-                                        if (
-                                            tableNum.startsWith("A")
-                                        )
-                                            "A"
-                                        else
-                                            "B"
-                                    )
+                                zone = finalZone
                             )
                         )
                     }
@@ -225,7 +230,7 @@ fun SoDoBanScreen(navController: NavController) {
                 try {
 
                     val url =
-                        URL("http://10.0.2.2:3001/api/tables/status")
+                        URL(ApiConfig.endpoint("/api/tables/status"))
 
                     conn =
                         url.openConnection()
@@ -237,6 +242,11 @@ fun SoDoBanScreen(navController: NavController) {
                         "Content-Type",
                         "application/json; utf-8"
                     )
+
+                    val token = TokenManager.getToken()
+                    if (!token.isNullOrBlank()) {
+                        conn.setRequestProperty("Authorization", "Bearer $token")
+                    }
 
                     conn.connectTimeout = 5000
                     conn.readTimeout = 5000

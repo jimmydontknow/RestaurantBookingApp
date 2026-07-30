@@ -3,7 +3,9 @@ package com.example.restaurantbookingapp.screens
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -35,7 +37,11 @@ fun StaffCustomerLookupScreen(
     }
 
     Column(
-        modifier = Modifier.fillMaxSize().background(Color(0xFFF8F9FA)).padding(16.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFFF8F9FA))
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         Text("Tra cứu khách hàng", fontSize = 22.sp, fontWeight = FontWeight.Bold)
@@ -90,8 +96,80 @@ fun StaffCustomerLookupScreen(
                         "Mức giảm hiện tại: ${customer.discountPercent.toInt()}%",
                         fontWeight = FontWeight.Bold
                     )
+                    Divider(modifier = Modifier.padding(vertical = 6.dp))
+                    Text(
+                        "Lịch sử hóa đơn (${customer.invoices.size})",
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (customer.invoices.isEmpty()) {
+                        Text(
+                            "Chưa có hóa đơn đã thanh toán cho khách này.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        customer.invoices.forEach { invoice ->
+                            CustomerInvoiceHistoryItem(
+                                invoice = invoice,
+                                formatter = formatter
+                            )
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun CustomerInvoiceHistoryItem(
+    invoice: CustomerInvoiceResult,
+    formatter: NumberFormat
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = Color(0xFFF8F9FA),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = invoice.bookingCode.ifBlank { "HD${invoice.id}" },
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF0D6EFD)
+                )
+                Text(
+                    text = formatter.format(invoice.totalAmount),
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF208A48)
+                )
+            }
+            Text("Bàn: ${invoice.tableSummary.ifBlank { "Chưa có" }}")
+            Text("Ngày thanh toán: ${invoice.paidAt.toDisplayDate()}")
+            Text(
+                "Tiền món: ${formatter.format(invoice.foodSubtotal)} | " +
+                    "Giảm: ${formatter.format(invoice.discountAmount)} | " +
+                    "Cọc: ${formatter.format(invoice.depositAmount)}",
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (invoice.note.isNotBlank()) {
+                Text(
+                    "Ghi chú: ${invoice.note}",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+private fun String.toDisplayDate(): String {
+    return ifBlank { "Chưa có" }
+        .replace("T", " ")
+        .replace("Z", "")
+        .take(19)
 }

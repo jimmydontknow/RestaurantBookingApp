@@ -15,6 +15,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
+import com.example.restaurantbookingapp.network.ApiConfig
+import com.example.restaurantbookingapp.network.TokenManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -37,9 +39,13 @@ fun TableMapScreen(navController: NavController) {
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             try {
-                val url = URL("http://10.0.2.2:3001/api/tables")
+                val url = URL(ApiConfig.endpoint("/api/tables"))
                 val conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"
+                val token = TokenManager.getToken()
+                if (!token.isNullOrBlank()) {
+                    conn.setRequestProperty("Authorization", "Bearer $token")
+                }
                 if (conn.responseCode == HttpURLConnection.HTTP_OK) {
                     val responseStr = conn.inputStream.bufferedReader().use { it.readText() }
                     val jsonArray = JSONObject(responseStr).getJSONArray("tables")
@@ -71,85 +77,107 @@ fun TableMapScreen(navController: NavController) {
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize().background(Color(0xFFF8F9FA))) {
-        // Khối tiêu đề trên cùng (Giữ nguyên cấu trúc ảnh mẫu)
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(text = "Trạng thái phòng máy lạnh", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.Black)
-            Text(text = "Xanh lá: Bàn trống | Xanh dương: Đang có khách", fontSize = 13.sp, color = Color.Gray)
-            Spacer(modifier = Modifier.height(12.dp))
-            Text(text = "Hiệu suất sử dụng: ${tableList.count { it.status != "Bàn trống" }} / 12 bàn đang ăn", fontSize = 14.sp, fontWeight = FontWeight.Medium)
-            Spacer(modifier = Modifier.height(6.dp))
-            LinearProgressIndicator(progress = { 1f }, modifier = Modifier.fillMaxWidth().height(4.dp), color = Color(0xFF007AFF), trackColor = Color(0xFFE5E5EA))
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFFF8F9FA))
+            .padding(16.dp)
+    ) {
+        Text(
+            text = "Sơ đồ bàn ăn",
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color.Black
+        )
+        Text(
+            text = "Trạng thái bàn thời gian thực",
+            fontSize = 13.sp,
+            color = Color.Gray
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Chú thích trạng thái bàn
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            StatusLegendItem(color = Color(0xFF34C759), label = "Bàn trống")
+            StatusLegendItem(color = Color(0xFFFF9500), label = "Đang đặt")
+            StatusLegendItem(color = Color(0xFFFF3B30), label = "Đang dùng")
         }
 
-        // Danh sách hiển thị sơ đồ dạng lưới 2 cột chuẩn thiết kế UI của bạn
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Sơ đồ lưới danh sách bàn
         LazyVerticalGrid(
-            columns = GridCells.Fixed(2),
-            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            columns = GridCells.Fixed(3),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.fillMaxSize()
         ) {
             items(tableList) { table ->
-                TableCard(tableItem = table)
+                TableCardItem(table = table)
             }
         }
     }
 }
 
-// --- THÀNH PHẦN CUSTOM TABLE CARD: ĐÃ NÂNG CẤP THÊM NHÃN GÓC TRÊN BÊN PHẢI ---
 @Composable
-fun TableCard(tableItem: TableMapItem) {
-    // Xác định hệ màu nền và màu chữ theo trạng thái hoạt động thực tế (Xanh dương cho "Đang dùng")
-    val isOccupied = tableItem.status == "Đang dùng" || tableItem.status == "Đang đặt"
-    val containerBgColor = if (isOccupied) Color(0xFFE5F1FF) else Color(0xFFE4F9E7)
-    val textMainColor = if (isOccupied) Color(0xFF0056B3) else Color(0xFF28A745)
+fun StatusLegendItem(color: Color, label: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Surface(
+            modifier = Modifier.size(12.dp),
+            color = color,
+            shape = RoundedCornerShape(3.dp)
+        ) {}
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(text = label, fontSize = 12.sp, color = Color.DarkGray)
+    }
+}
 
-    // Xác định màu sắc nhãn phân loại: "ghép" sẽ có nhãn màu cam cảnh báo rực rỡ, "đơn" màu xám nhẹ
-    val isMerged = tableItem.type == "ghép"
-    val badgeBgColor = if (isMerged) Color(0xFFFF9500) else Color(0xFF8E8E93)
+@Composable
+fun TableCardItem(table: TableMapItem) {
+    val statusColor = when (table.status) {
+        "Đang dùng" -> Color(0xFFFF3B30)
+        "Đang đặt" -> Color(0xFFFF9500)
+        else -> Color(0xFF34C759)
+    }
 
-    // Sử dụng Box làm FrameLayout bao bọc để hỗ trợ đặt linh kiện nhãn xếp chồng góc phải
-    Box(
+    Card(
         modifier = Modifier
             .fillMaxWidth()
-            .height(110.dp)
-            .background(color = containerBgColor, shape = RoundedCornerShape(12.dp))
-            .padding(12.dp)
+            .height(90.dp),
+        shape = RoundedCornerShape(10.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(2.dp)
     ) {
-        // 1. Nhãn định vị phân loại (Nằm ở Góc trên bên phải - Alignment.TopEnd)
-        Surface(
-            modifier = Modifier.align(Alignment.TopEnd),
-            color = badgeBgColor,
-            shape = RoundedCornerShape(4.dp)
-        ) {
-            Text(
-                text = tableItem.type, // Hiển thị chữ "đơn" hoặc "ghép"
-                color = Color.White,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-            )
-        }
-
-        // 2. Nội dung thông tin chính của bàn (Căn giữa không gian ô chứa)
         Column(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
         ) {
             Text(
-                text = tableItem.name, // Ví dụ: "BÀN 01"
-                fontSize = 16.sp,
+                text = table.name,
+                fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color.Black
             )
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = tableItem.status, // Ví dụ: "Đang dùng"
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Medium,
-                color = textMainColor
-            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Surface(
+                color = statusColor.copy(alpha = 0.15f),
+                shape = RoundedCornerShape(6.dp)
+            ) {
+                Text(
+                    text = table.status,
+                    fontSize = 11.sp,
+                    color = statusColor,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
         }
     }
 }

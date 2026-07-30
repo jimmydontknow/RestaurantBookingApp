@@ -1,4 +1,4 @@
-package com.example.restaurantbookingapp.screens
+﻿package com.example.restaurantbookingapp.screens
 
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
@@ -33,6 +33,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.example.restaurantbookingapp.network.TokenManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -43,7 +44,6 @@ import java.net.URL
 import java.text.NumberFormat
 import java.util.Locale
 
-import android.content.Context
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CustomerMainScreen(rootNavController: NavController) {
@@ -78,16 +78,7 @@ fun CustomerMainScreen(rootNavController: NavController) {
                 NavigationBarItem(
                     selected = false,
                     onClick = {
-                        val prefs = rootNavController.context.getSharedPreferences(
-                            "APP_USERS",
-                            Context.MODE_PRIVATE
-                        )
-                        prefs.edit()
-                            .remove("current_username")
-                            .remove("current_fullName")
-                            .remove("current_phoneNumber")
-                            .remove("current_role")
-                            .apply()
+                        TokenManager.clearSession()
                         rootNavController.navigate("login") {
                             popUpTo("customer_main") { inclusive = true }
                         }
@@ -151,10 +142,9 @@ fun CustomerBookingScreen(
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
-    val prefs = context.getSharedPreferences("APP_USERS", android.content.Context.MODE_PRIVATE)
-    val savedName = prefs.getString("current_fullName", "") ?: ""
-    val savedPhone = prefs.getString("current_phoneNumber", "") ?: ""
-    val loggedInUsername = prefs.getString("current_username", "") ?: ""
+    val savedName = TokenManager.getFullName().orEmpty()
+    val savedPhone = TokenManager.getPhone().orEmpty()
+    val loggedInUsername = TokenManager.getUsername().orEmpty()
 
     var isWalkIn by rememberSaveable { mutableStateOf(savedName.isBlank() && savedPhone.isBlank()) }  //Form đặt bàn khách giữ tên, SĐT, ngày giờ, khu vực, bàn và món đã chọn khi xoay màn hình bằng
     var guestName by rememberSaveable { mutableStateOf(savedName) }
@@ -226,6 +216,9 @@ fun CustomerBookingScreen(
             conn.requestMethod = "GET"
             conn.connectTimeout = 5000
             conn.readTimeout = 5000
+            TokenManager.getToken()?.takeIf { it.isNotBlank() }?.let { token ->
+                conn.setRequestProperty("Authorization", "Bearer $token")
+            }
             if (conn.responseCode == HttpURLConnection.HTTP_OK) {
                 val obj = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
                 val found = obj.optBoolean("found", false)
@@ -246,8 +239,12 @@ fun CustomerBookingScreen(
     suspend fun loadTables() = withContext(Dispatchers.IO) {
         var conn: HttpURLConnection? = null
         try {
-            conn = URL("http://10.0.2.2:3001/api/tables").openConnection() as HttpURLConnection
+            conn = URL(com.example.restaurantbookingapp.network.ApiConfig.endpoint("/api/tables")).openConnection() as HttpURLConnection
             conn.requestMethod = "GET"
+            val token = com.example.restaurantbookingapp.network.TokenManager.getToken()
+            if (!token.isNullOrBlank()) {
+                conn.setRequestProperty("Authorization", "Bearer $token")
+            }
             if (conn.responseCode == HttpURLConnection.HTTP_OK) {
                 val arr = JSONObject(conn.inputStream.bufferedReader().use { it.readText() }).getJSONArray("tables")
                 val fetched = mutableListOf<TableData>()
@@ -260,7 +257,18 @@ fun CustomerBookingScreen(
                         rawStatus.equals("booked", true) || rawStatus.equals("Đã đặt", true) -> "booked"
                         else -> "available"
                     }
-                    fetched.add(TableData(obj.optString("id", obj.optString("TableID", "")), number, "BÀN $number", status, obj.optString("zone", if (number.startsWith("A")) "A" else "B")))
+                    val numUpper = number.trim().uppercase()
+                    val pZone = obj.optString("zone", "").uppercase()
+                    val fZone = when {
+                        pZone == "A" || pZone == "B" -> pZone
+                        numUpper.startsWith("A") -> "A"
+                        numUpper.startsWith("B") -> "B"
+                        else -> {
+                            val num = numUpper.filter { it.isDigit() }.toIntOrNull() ?: 1
+                            if (num <= 6) "A" else "B"
+                        }
+                    }
+                    fetched.add(TableData(obj.optString("id", obj.optString("TableID", "")), number, if (numUpper.startsWith("BÀN")) numUpper else "BÀN $number", status, fZone))
                 }
                 withContext(Dispatchers.Main) {
                     allTables.clear()
@@ -304,26 +312,6 @@ fun CustomerBookingScreen(
         }
     }
 
-    suspend fun markTablesBooked() = withContext(Dispatchers.IO) {
-        selectedTables.forEach { table ->
-            var conn: HttpURLConnection? = null
-            try {
-                conn = URL("http://10.0.2.2:3001/api/tables/status").openConnection() as HttpURLConnection
-                conn.requestMethod = "PUT"
-                conn.setRequestProperty("Content-Type", "application/json; utf-8")
-                conn.doOutput = true
-                val body = JSONObject().apply {
-                    put("id", table.id.toIntOrNull() ?: table.id)
-                    put("status", "booked")
-                }.toString()
-                conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-                conn.responseCode
-            } finally {
-                conn?.disconnect()
-            }
-        }
-    }
-
     suspend fun submitFoods(bookingId: Int) = withContext(Dispatchers.IO) {
         foods.filter { (quantities[it.foodId] ?: 0) > 0 }.forEach { food ->
             var conn: HttpURLConnection? = null
@@ -331,6 +319,9 @@ fun CustomerBookingScreen(
                 conn = URL("http://10.0.2.2:3001/api/order-items/add").openConnection() as HttpURLConnection
                 conn.requestMethod = "POST"
                 conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                TokenManager.getToken()?.takeIf { it.isNotBlank() }?.let { token ->
+                    conn.setRequestProperty("Authorization", "Bearer $token")
+                }
                 conn.doOutput = true
                 val body = JSONObject().apply {
                     put("bookingId", bookingId)
@@ -483,9 +474,12 @@ fun CustomerBookingScreen(
                                         conn = URL("http://10.0.2.2:3001/api/bookings").openConnection() as HttpURLConnection
                                         conn.requestMethod = "POST"
                                         conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                                        TokenManager.getToken()?.takeIf { it.isNotBlank() }?.let { token ->
+                                            conn.setRequestProperty("Authorization", "Bearer $token")
+                                        }
                                         conn.doOutput = true
                                         val body = JSONObject().apply {
-                                            put("customerUsername", if (isWalkIn) "" else loggedInUsername)
+                                            put("customerUsername", loggedInUsername)
                                             put("guestName", guestName)
                                             put("phoneNumber", phoneNumber)
                                             put("tableNumber", tableSummary)
@@ -501,7 +495,6 @@ fun CustomerBookingScreen(
                                             val bookingId = JSONObject(response).optInt("bookingId", 0)
                                             if (bookingId > 0) {
                                                 submitFoods(bookingId)
-                                                markTablesBooked()
                                             }
                                             withContext(Dispatchers.Main) {
                                                 isLoading = false
@@ -546,9 +539,8 @@ fun CustomerOrdersScreen(navController: NavController) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
-    val prefs = context.getSharedPreferences("APP_USERS", android.content.Context.MODE_PRIVATE)
-    val currentUsername = prefs.getString("current_username", "") ?: ""
-    val currentPhone = prefs.getString("current_phoneNumber", "") ?: ""
+    val currentUsername = TokenManager.getUsername().orEmpty()
+    val currentPhone = TokenManager.getPhone().orEmpty()
 
     val bookingList = remember { mutableStateListOf<BookingItem>() }
     var isLoading by remember { mutableStateOf(false) }
@@ -568,6 +560,9 @@ fun CustomerOrdersScreen(navController: NavController) {
                 conn.requestMethod = "GET"
                 conn.connectTimeout = 5000
                 conn.readTimeout = 5000
+                TokenManager.getToken()?.takeIf { it.isNotBlank() }?.let { token ->
+                    conn.setRequestProperty("Authorization", "Bearer $token")
+                }
 
                 if (conn.responseCode == HttpURLConnection.HTTP_OK) {
                     val str = conn.inputStream.bufferedReader().use { it.readText() }
@@ -645,6 +640,9 @@ fun CustomerOrdersScreen(navController: NavController) {
                 conn.requestMethod = "DELETE"
                 conn.connectTimeout = 5000
                 conn.readTimeout = 5000
+                TokenManager.getToken()?.takeIf { it.isNotBlank() }?.let { token ->
+                    conn.setRequestProperty("Authorization", "Bearer $token")
+                }
                 val code = conn.responseCode
                 withContext(Dispatchers.Main) {
                     if (code == HttpURLConnection.HTTP_OK) {
@@ -673,6 +671,9 @@ fun CustomerOrdersScreen(navController: NavController) {
                 conn.connectTimeout = 5000
                 conn.readTimeout = 5000
                 conn.doOutput = true
+                TokenManager.getToken()?.takeIf { it.isNotBlank() }?.let { token ->
+                    conn.setRequestProperty("Authorization", "Bearer $token")
+                }
 
                 val body = JSONObject().apply {
                     put("id", booking.id.toIntOrNull() ?: booking.id)
@@ -920,6 +921,9 @@ fun CustomerMenuScreen(navController: NavController, bookingId: Int) {
                 conn.disconnect()
                 conn = URL("http://10.0.2.2:3001/api/bookings/$bookingId/order-items").openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"
+                TokenManager.getToken()?.takeIf { it.isNotBlank() }?.let { token ->
+                    conn.setRequestProperty("Authorization", "Bearer $token")
+                }
                 val existing = mutableMapOf<Int, Int>()
                 if (conn.responseCode == HttpURLConnection.HTTP_OK) {
                     val orderArr = JSONObject(conn.inputStream.bufferedReader().use { it.readText() }).getJSONArray("items")
@@ -958,6 +962,9 @@ fun CustomerMenuScreen(navController: NavController, bookingId: Int) {
             try {
                 conn = URL("http://10.0.2.2:3001/api/bookings/$bookingId/order-items").openConnection() as HttpURLConnection
                 conn.requestMethod = "DELETE"
+                TokenManager.getToken()?.takeIf { it.isNotBlank() }?.let { token ->
+                    conn.setRequestProperty("Authorization", "Bearer $token")
+                }
                 ok = conn.responseCode == HttpURLConnection.HTTP_OK
             } finally {
                 conn?.disconnect()
@@ -969,6 +976,9 @@ fun CustomerMenuScreen(navController: NavController, bookingId: Int) {
                         conn = URL("http://10.0.2.2:3001/api/order-items/add").openConnection() as HttpURLConnection
                         conn.requestMethod = "POST"
                         conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                        TokenManager.getToken()?.takeIf { it.isNotBlank() }?.let { token ->
+                            conn.setRequestProperty("Authorization", "Bearer $token")
+                        }
                         conn.doOutput = true
                         val body = JSONObject().apply {
                             put("bookingId", bookingId)
@@ -1329,3 +1339,4 @@ fun CustomerTableCell(table: TableData) {
         }
     }
 }
+

@@ -26,6 +26,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
+import com.example.restaurantbookingapp.network.ApiConfig
+import com.example.restaurantbookingapp.network.TokenManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -89,11 +91,15 @@ fun CreateBookingScreen(navController: NavController) {
         withContext(Dispatchers.IO) {
             var conn: HttpURLConnection? = null
             try {
-                val url = URL("http://10.0.2.2:3001/api/tables")
+                val url = URL(ApiConfig.endpoint("/api/tables"))
                 conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"
                 conn.connectTimeout = 5000
                 conn.readTimeout = 5000
+                val token = TokenManager.getToken()
+                if (!token.isNullOrBlank()) {
+                    conn.setRequestProperty("Authorization", "Bearer $token")
+                }
 
                 if (conn.responseCode == HttpURLConnection.HTTP_OK) {
                     val responseStr = conn.inputStream.bufferedReader().use { it.readText() }
@@ -109,13 +115,25 @@ fun CreateBookingScreen(navController: NavController) {
                             else -> "available"
                         }
 
+                        val tableNumUpper = tableNumber.trim().uppercase()
+                        val parsedZone = item.optString("zone", "").uppercase()
+                        val finalZone = when {
+                            parsedZone == "A" || parsedZone == "B" -> parsedZone
+                            tableNumUpper.startsWith("A") -> "A"
+                            tableNumUpper.startsWith("B") -> "B"
+                            else -> {
+                                val num = tableNumUpper.filter { it.isDigit() }.toIntOrNull() ?: 1
+                                if (num <= 6) "A" else "B"
+                            }
+                        }
+
                         fetched.add(
                             TableData(
                                 id = item.optString("id", item.optString("TableID", "")),
                                 tableNumber = tableNumber,
-                                tableName = "BÀN $tableNumber",
+                                tableName = if (tableNumUpper.startsWith("BÀN")) tableNumUpper else "BÀN $tableNumber",
                                 status = normalizedStatus,
-                                zone = item.optString("zone", if (tableNumber.startsWith("A")) "A" else "B"),
+                                zone = finalZone,
                             )
                         )
                     }
@@ -142,10 +160,14 @@ fun CreateBookingScreen(navController: NavController) {
             tableIds.forEach { tableId ->
                 var conn: HttpURLConnection? = null
                 try {
-                    val url = URL("http://10.0.2.2:3001/api/tables/status")
+                    val url = URL(ApiConfig.endpoint("/api/tables/status"))
                     conn = url.openConnection() as HttpURLConnection
                     conn.requestMethod = "PUT"
                     conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                    val token = TokenManager.getToken()
+                    if (!token.isNullOrBlank()) {
+                        conn.setRequestProperty("Authorization", "Bearer $token")
+                    }
                     conn.connectTimeout = 5000
                     conn.readTimeout = 5000
                     conn.doOutput = true
@@ -195,14 +217,18 @@ fun CreateBookingScreen(navController: NavController) {
         }
     }
     // --- HÀM TẠO ĐẶT BÀN ---
-    suspend fun createBooking(): Int? {
+    suspend fun createBookingWithDetails(): Pair<Int?, String?> {
         return withContext(Dispatchers.IO) {
             var conn: HttpURLConnection? = null
             try {
-                val url = URL("http://10.0.2.2:3001/api/bookings")
+                val url = URL(ApiConfig.endpoint("/api/bookings"))
                 conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "POST"
                 conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                val token = TokenManager.getToken()
+                if (!token.isNullOrBlank()) {
+                    conn.setRequestProperty("Authorization", "Bearer $token")
+                }
                 conn.connectTimeout = 5000
                 conn.readTimeout = 5000
                 conn.doOutput = true
@@ -213,8 +239,8 @@ fun CreateBookingScreen(navController: NavController) {
                     put("tableNumber", tableSummaryForServer)
                     put("depositAmount", depositAmount.toIntOrNull() ?: 0)
                     put("note", note)
-                    put("bookingDate", bookingDate)   // ĐÃ THÊM
-                    put("bookingTime", bookingTime)   // ĐÃ THÊM
+                    put("bookingDate", bookingDate)
+                    put("bookingTime", bookingTime)
                 }.toString()
 
                 conn.outputStream.use { os ->
@@ -224,18 +250,27 @@ fun CreateBookingScreen(navController: NavController) {
                 val code = conn.responseCode
                 if (code == HttpURLConnection.HTTP_OK || code == HttpURLConnection.HTTP_CREATED) {
                     val responseText = conn.inputStream.bufferedReader().use { it.readText() }
-                    JSONObject(responseText).optInt("bookingId").takeIf { it > 0 }
+                    val bookingId = JSONObject(responseText).optInt("bookingId").takeIf { it > 0 }
+                    Pair(bookingId, null)
                 } else {
-                    null
+                    val errorStreamText = conn.errorStream?.bufferedReader()?.use { it.readText() }
+                    val msg = try {
+                        if (!errorStreamText.isNullOrBlank()) JSONObject(errorStreamText).optString("message", "HTTP $code") else "HTTP $code"
+                    } catch (_: Exception) {
+                        "HTTP $code"
+                    }
+                    Pair(null, msg)
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                null
+                Pair(null, e.message ?: "Lỗi kết nối")
             } finally {
                 conn?.disconnect()
             }
         }
     }
+
+    suspend fun createBooking(): Int? = createBookingWithDetails().first
 
     // Tải bàn khi mở màn hình
     fun submitBooking(openMenuAfterCreate: Boolean) {
@@ -248,7 +283,7 @@ fun CreateBookingScreen(navController: NavController) {
                 Toast.makeText(context, "Vui lòng chọn ít nhất 1 bàn!", Toast.LENGTH_SHORT).show()
             else -> {
                 coroutineScope.launch {
-                    val bookingId = createBooking()
+                    val (bookingId, errorMsg) = createBookingWithDetails()
                     if (bookingId != null) {
                         markTablesAsBooked(selectedTables.map { it.id })
                         Toast.makeText(
@@ -262,7 +297,8 @@ fun CreateBookingScreen(navController: NavController) {
                             navController.popBackStack()
                         }
                     } else {
-                        Toast.makeText(context, "Lỗi tạo đặt bàn, thử lại!", Toast.LENGTH_LONG).show()
+                        val msg = if (!errorMsg.isNullOrBlank()) "Lỗi đặt bàn: $errorMsg" else "Lỗi tạo đặt bàn, vui lòng kiểm tra kết nối Server!"
+                        Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                     }
                 }
             }
@@ -490,8 +526,8 @@ fun CreateBookingScreen(navController: NavController) {
             // 3. CHỌN KHU VỰC
             Box(modifier = Modifier.fillMaxWidth()) {
                 OutlinedTextField(
-                    value = if (selectedZone == "A") "Khu A — Phòng lạnh (20 bàn, tối đa 10 người/bàn)"
-                    else "Khu B — Ngoài trời (10 bàn, tối đa 20 người/bàn)",
+                    value = if (selectedZone == "A") "Khu A — Phòng lạnh (6 bàn, tối đa 10 người/bàn)"
+                    else "Khu B — Ngoài trời (6 bàn, tối đa 20 người/bàn)",
                     onValueChange = {},
                     readOnly = true,
                     label = { Text("Chọn khu vực") },
@@ -513,7 +549,7 @@ fun CreateBookingScreen(navController: NavController) {
                     onDismissRequest = { expandedZoneDropdown = false }
                 ) {
                     DropdownMenuItem(
-                        text = { Text("Khu A — Phòng lạnh (20 bàn)") },
+                        text = { Text("Khu A — Phòng lạnh (6 bàn)") },
                         onClick = {
                             selectedZone = "A"
                             selectedTables.clear() // Reset bàn đã chọn khi đổi khu
@@ -521,7 +557,7 @@ fun CreateBookingScreen(navController: NavController) {
                         }
                     )
                     DropdownMenuItem(
-                        text = { Text("Khu B — Ngoài trời (10 bàn)") },
+                        text = { Text("Khu B — Ngoài trời (6 bàn)") },
                         onClick = {
                             selectedZone = "B"
                             selectedTables.clear()
@@ -641,7 +677,7 @@ fun CreateBookingScreen(navController: NavController) {
                         else -> {
                             coroutineScope.launch {
                                 // Bước 1: Tạo booking
-                                val bookingId = createBooking()
+                                val (bookingId, errorMsg) = createBookingWithDetails()
                                 if (bookingId != null) {
                                     // Bước 2: Cập nhật trạng thái các bàn đã chọn → "booked"
                                     markTablesAsBooked(selectedTables.map { it.id })
@@ -652,7 +688,8 @@ fun CreateBookingScreen(navController: NavController) {
                                     ).show()
                                     navController.popBackStack()
                                 } else {
-                                    Toast.makeText(context, "Lỗi tạo đặt bàn, thử lại!", Toast.LENGTH_LONG).show()
+                                    val msg = if (!errorMsg.isNullOrBlank()) "Lỗi đặt bàn: $errorMsg" else "Lỗi tạo đặt bàn, vui lòng kiểm tra kết nối Server!"
+                                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                                 }
                             }
                         }

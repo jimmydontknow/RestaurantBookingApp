@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const sql = require('mssql');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
@@ -29,7 +30,13 @@ app.get('/api/health', async (req, res) => {
     }
 });
 
-const PORT = 3001;
+const PORT = parseInt(process.env.PORT || '3001', 10);
+const AUTH_TOKEN_TTL_SECONDS = parseInt(process.env.AUTH_TOKEN_TTL_SECONDS || '86400', 10);
+const PASSWORD_ITERATIONS = parseInt(process.env.PASSWORD_ITERATIONS || '120000', 10);
+const PASSWORD_KEY_LENGTH = 32;
+const PASSWORD_DIGEST = 'sha256';
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-only-change-this-secret';
+const ENABLE_AUTH_GUARDS = process.env.ENABLE_AUTH_GUARDS === 'true';
 
 const config = {
     user: process.env.DB_USER || 'sa',
@@ -116,6 +123,381 @@ sql.on('error', error => {
     clearPool();
 });
 
+function normalizeRole(role) {
+    const value = (role || 'customer').toString().trim().toLowerCase();
+    if (['admin', 'manager', 'receptionist'].includes(value)) return 'admin';
+    if (['employee', 'staff'].includes(value)) return 'staff';
+    return 'customer';
+}
+
+function base64UrlEncode(value) {
+    return Buffer.from(value)
+        .toString('base64')
+        .replace(/=/g, '')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_');
+}
+
+function base64UrlDecode(value) {
+    const padded = value + '='.repeat((4 - value.length % 4) % 4);
+    return Buffer.from(padded.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+}
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+    const hash = crypto.pbkdf2Sync(
+        password,
+        salt,
+        PASSWORD_ITERATIONS,
+        PASSWORD_KEY_LENGTH,
+        PASSWORD_DIGEST
+    ).toString('hex');
+
+    return { hash, salt, iterations: PASSWORD_ITERATIONS };
+}
+
+function verifyPassword(password, salt, expectedHash, iterations) {
+    const actualHash = crypto.pbkdf2Sync(
+        password,
+        salt,
+        parseInt(iterations || PASSWORD_ITERATIONS, 10),
+        PASSWORD_KEY_LENGTH,
+        PASSWORD_DIGEST
+    );
+    const expected = Buffer.from(expectedHash || '', 'hex');
+    return expected.length === actualHash.length && crypto.timingSafeEqual(actualHash, expected);
+}
+
+function signToken(payload) {
+    const now = Math.floor(Date.now() / 1000);
+    const header = { alg: 'HS256', typ: 'JWT' };
+    const body = {
+        ...payload,
+        iat: now,
+        exp: now + AUTH_TOKEN_TTL_SECONDS
+    };
+    const encodedHeader = base64UrlEncode(JSON.stringify(header));
+    const encodedBody = base64UrlEncode(JSON.stringify(body));
+    const signature = crypto
+        .createHmac('sha256', JWT_SECRET)
+        .update(`${encodedHeader}.${encodedBody}`)
+        .digest();
+    return `${encodedHeader}.${encodedBody}.${base64UrlEncode(signature)}`;
+}
+
+function verifyToken(token) {
+    if (!token || typeof token !== 'string') {
+        throw new Error('Missing token');
+    }
+
+    const parts = token.split('.');
+    if (parts.length !== 3) {
+        throw new Error('Invalid token');
+    }
+
+    const [encodedHeader, encodedBody, encodedSignature] = parts;
+    const expectedSignature = crypto
+        .createHmac('sha256', JWT_SECRET)
+        .update(`${encodedHeader}.${encodedBody}`)
+        .digest();
+    const actualSignature = base64UrlDecode(encodedSignature);
+
+    if (
+        actualSignature.length !== expectedSignature.length ||
+        !crypto.timingSafeEqual(actualSignature, expectedSignature)
+    ) {
+        throw new Error('Invalid token signature');
+    }
+
+    const payload = JSON.parse(base64UrlDecode(encodedBody).toString('utf8'));
+    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
+        throw new Error('Token expired');
+    }
+    return payload;
+}
+
+function getBearerToken(req) {
+    const header = req.headers.authorization || '';
+    const match = header.match(/^Bearer\s+(.+)$/i);
+    return match ? match[1] : '';
+}
+
+function sanitizeUser(row) {
+    return {
+        id: row.UserID,
+        username: row.Username,
+        fullName: row.FullName || '',
+        phoneNumber: row.PhoneNumber || '',
+        role: normalizeRole(row.Role),
+        createdAt: row.CreatedAt,
+        lastLoginAt: row.LastLoginAt
+    };
+}
+
+async function ensureAuthSchema(pool) {
+    await pool.request().query(`
+        IF OBJECT_ID('dbo.AppUsers', 'U') IS NULL
+        BEGIN
+            CREATE TABLE dbo.AppUsers (
+                UserID INT IDENTITY(1,1) PRIMARY KEY,
+                Username NVARCHAR(80) NOT NULL UNIQUE,
+                FullName NVARCHAR(120) NULL,
+                PhoneNumber NVARCHAR(20) NULL,
+                Role NVARCHAR(20) NOT NULL CONSTRAINT DF_AppUsers_Role DEFAULT 'customer',
+                PasswordHash NVARCHAR(256) NOT NULL,
+                PasswordSalt NVARCHAR(64) NOT NULL,
+                PasswordIterations INT NOT NULL,
+                IsActive BIT NOT NULL CONSTRAINT DF_AppUsers_IsActive DEFAULT 1,
+                CreatedAt DATETIME2 NOT NULL CONSTRAINT DF_AppUsers_CreatedAt DEFAULT SYSUTCDATETIME(),
+                LastLoginAt DATETIME2 NULL
+            );
+        END;
+
+        IF NOT EXISTS (
+            SELECT 1
+            FROM sys.indexes
+            WHERE name = 'IX_AppUsers_PhoneNumber'
+              AND object_id = OBJECT_ID('dbo.AppUsers')
+        )
+        BEGIN
+            CREATE INDEX IX_AppUsers_PhoneNumber ON dbo.AppUsers(PhoneNumber);
+        END;
+    `);
+}
+
+async function requireAuth(req, res, next) {
+    try {
+        const payload = verifyToken(getBearerToken(req));
+        const pool = await getPool();
+        await ensureAuthSchema(pool);
+        const result = await pool.request()
+            .input('UserID', sql.Int, parseInt(payload.sub, 10))
+            .query(`
+                SELECT TOP 1 *
+                FROM AppUsers
+                WHERE UserID = @UserID AND IsActive = 1
+            `);
+
+        if (result.recordset.length === 0) {
+            return res.status(401).json({ success: false, message: 'Invalid session' });
+        }
+
+        req.user = sanitizeUser(result.recordset[0]);
+        next();
+    } catch (error) {
+        res.status(401).json({ success: false, message: 'Unauthorized: ' + error.message });
+    }
+}
+
+function requireRoles(...roles) {
+    const allowed = new Set(roles.map(normalizeRole));
+    return (req, res, next) => {
+        if (!req.user || !allowed.has(normalizeRole(req.user.role))) {
+            return res.status(403).json({ success: false, message: 'Forbidden' });
+        }
+        next();
+    };
+}
+
+function isPublicApi(req) {
+    const path = req.path.toLowerCase();
+    return (
+        path === '/health' ||
+        path.startsWith('/auth/') ||
+        (req.method === 'GET' && path === '/tables') ||
+        (req.method === 'GET' && path === '/menu')
+    );
+}
+
+function requiredRolesForRequest(req) {
+    const path = req.path.toLowerCase();
+    if (path.startsWith('/admin/')) return ['admin'];
+    if (path.startsWith('/dashboard/')) return ['admin', 'staff'];
+    if (path.startsWith('/invoices')) return ['admin', 'staff'];
+    if (path.includes('/payment-summary')) return ['admin', 'staff'];
+    if (path === '/tables/status') return ['admin', 'staff'];
+    if (path === '/bookings/status') return ['admin', 'staff'];
+    if (path === '/bookings/cancelled') return ['admin', 'staff'];
+    if (path.startsWith('/customers/lookup')) return ['admin', 'staff', 'customer'];
+    if (path.startsWith('/order-items')) return ['admin', 'staff', 'customer'];
+    if (path.startsWith('/bookings')) return ['admin', 'staff', 'customer'];
+    return ['admin'];
+}
+
+async function optionalAuthGuards(req, res, next) {
+    if (!ENABLE_AUTH_GUARDS || isPublicApi(req)) {
+        return next();
+    }
+
+    await requireAuth(req, res, () => {
+        const allowed = new Set(requiredRolesForRequest(req).map(normalizeRole));
+        if (!allowed.has(normalizeRole(req.user.role))) {
+            return res.status(403).json({
+                success: false,
+                message: 'Forbidden'
+            });
+        }
+        next();
+    });
+}
+
+// ======================================================
+// BACKEND AUTHENTICATION
+// ======================================================
+
+app.post('/api/auth/register', async (req, res) => {
+    try {
+        const username = (req.body.username || '').toString().trim();
+        const password = (req.body.password || '').toString();
+        const fullName = (req.body.fullName || req.body.name || '').toString().trim();
+        const phoneNumber = (req.body.phoneNumber || req.body.phone || '').toString().trim();
+        const role = normalizeRole(req.body.role);
+
+        if (!username || !password) {
+            return res.status(400).json({
+                success: false,
+                message: 'Username and password are required'
+            });
+        }
+
+        if (password.length < 6) {
+            return res.status(400).json({
+                success: false,
+                message: 'Password must be at least 6 characters'
+            });
+        }
+
+        const pool = await getPool();
+        await ensureAuthSchema(pool);
+
+        const existing = await pool.request()
+            .input('Username', sql.NVarChar, username)
+            .query(`
+                SELECT TOP 1 UserID
+                FROM AppUsers
+                WHERE Username = @Username
+            `);
+
+        if (existing.recordset.length > 0) {
+            return res.status(409).json({
+                success: false,
+                message: 'Username already exists'
+            });
+        }
+
+        const passwordData = hashPassword(password);
+        const insertResult = await pool.request()
+            .input('Username', sql.NVarChar, username)
+            .input('FullName', sql.NVarChar, fullName)
+            .input('PhoneNumber', sql.NVarChar, phoneNumber)
+            .input('Role', sql.NVarChar, role)
+            .input('PasswordHash', sql.NVarChar, passwordData.hash)
+            .input('PasswordSalt', sql.NVarChar, passwordData.salt)
+            .input('PasswordIterations', sql.Int, passwordData.iterations)
+            .query(`
+                INSERT INTO AppUsers
+                (
+                    Username, FullName, PhoneNumber, Role,
+                    PasswordHash, PasswordSalt, PasswordIterations
+                )
+                OUTPUT INSERTED.*
+                VALUES
+                (
+                    @Username, @FullName, @PhoneNumber, @Role,
+                    @PasswordHash, @PasswordSalt, @PasswordIterations
+                )
+            `);
+
+        const user = sanitizeUser(insertResult.recordset[0]);
+        const token = signToken({
+            sub: user.id,
+            username: user.username,
+            role: user.role
+        });
+
+        res.status(201).json({ success: true, user, token, tokenType: 'Bearer' });
+    } catch (error) {
+        console.error('Register error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Register failed: ' + error.message
+        });
+    }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const username = (req.body.username || '').toString().trim();
+        const password = (req.body.password || '').toString();
+
+        if (!username || !password) {
+            return res.status(400).json({
+                success: false,
+                message: 'Username and password are required'
+            });
+        }
+
+        const pool = await getPool();
+        await ensureAuthSchema(pool);
+        const result = await pool.request()
+            .input('Username', sql.NVarChar, username)
+            .query(`
+                SELECT TOP 1 *
+                FROM AppUsers
+                WHERE Username = @Username AND IsActive = 1
+            `);
+
+        if (result.recordset.length === 0) {
+            return res.status(401).json({
+                success: false,
+                message: 'Invalid username or password'
+            });
+        }
+
+        const row = result.recordset[0];
+        if (!verifyPassword(password, row.PasswordSalt, row.PasswordHash, row.PasswordIterations)) {
+            return res.status(401).json({
+                success: false,
+                message: 'Invalid username or password'
+            });
+        }
+
+        await pool.request()
+            .input('UserID', sql.Int, row.UserID)
+            .query(`
+                UPDATE AppUsers
+                SET LastLoginAt = SYSUTCDATETIME()
+                WHERE UserID = @UserID
+            `);
+
+        const user = sanitizeUser(row);
+        const token = signToken({
+            sub: user.id,
+            username: user.username,
+            role: user.role
+        });
+
+        res.json({ success: true, user, token, tokenType: 'Bearer' });
+    } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Login failed: ' + error.message
+        });
+    }
+});
+
+app.get('/api/auth/me', requireAuth, async (req, res) => {
+    res.json({ success: true, user: req.user });
+});
+
+app.post('/api/auth/logout', requireAuth, async (req, res) => {
+    res.json({
+        success: true,
+        message: 'Client should delete the local token'
+    });
+});
+
+app.use('/api', optionalAuthGuards);
 
 function normalizeTableStatus(status) {
     const value = (status || '').toString().trim().toLowerCase();
@@ -128,9 +510,28 @@ function normalizeTableStatus(status) {
     return 'available';
 }
 
+function tableNumberValue(tableNumber) {
+    const value = (tableNumber || '').toString().trim().toUpperCase();
+    const match = value.match(/\d+/);
+    return match ? parseInt(match[0], 10) : null;
+}
+
+function deriveTableZone(tableNumber) {
+    const value = (tableNumber || '').toString().trim().toUpperCase();
+    if (value.startsWith('A')) return 'A';
+    if (value.startsWith('B')) return 'B';
+    const number = tableNumberValue(value);
+    return number !== null && number <= 6 ? 'A' : 'B';
+}
+
 function extractTableNumbers(summary) {
+    const value = (summary || '').toString().toUpperCase();
+    const tableWordIndex = value.indexOf('BÀN');
+    const searchable = tableWordIndex >= 0
+        ? value.substring(tableWordIndex + 3)
+        : value;
     return Array.from(
-        new Set(((summary || '').toString().toUpperCase().match(/[AB]\d+/g) || []))
+        new Set((searchable.match(/[AB]?\d+/g) || []).map(item => item.trim()))
     );
 }
 
@@ -222,42 +623,165 @@ app.get('/api/customers/lookup', async (req, res) => {
         }
 
         const pool = await getPool();
-        const result = await pool.request()
-            .input('Keyword', sql.NVarChar, keyword)
-            .query(`
+
+        // 1. Tìm tất cả danh tính khách hàng khớp từ Invoices, Bookings, và users
+        const matchingReq = pool.request();
+        matchingReq.input('Keyword', sql.NVarChar, keyword);
+        const matchingRes = await matchingReq.query(`
+            SELECT DISTINCT TRIM(name) AS GuestName, TRIM(phone) AS GuestPhone
+            FROM (
+                SELECT ISNULL(GuestName, '') AS name, ISNULL(GuestPhone, '') AS phone
+                FROM Invoices
+                WHERE (GuestPhone LIKE '%' + @Keyword + '%' OR GuestName LIKE N'%' + @Keyword + '%')
+                  AND (GuestPhone <> '' OR GuestName <> '')
+
+                UNION
+
+                SELECT ISNULL(GuestName, '') AS name, ISNULL(PhoneNumber, '') AS phone
+                FROM Bookings
+                WHERE (PhoneNumber LIKE '%' + @Keyword + '%' OR GuestName LIKE N'%' + @Keyword + '%')
+                  AND (PhoneNumber <> '' OR GuestName <> '')
+
+                UNION
+
+                SELECT ISNULL(full_name, '') AS name, ISNULL(phone, '') AS phone
+                FROM users
+                WHERE (phone LIKE '%' + @Keyword + '%' OR full_name LIKE N'%' + @Keyword + '%')
+                  AND (phone <> '' OR full_name <> '')
+            ) AS FoundCustomers
+            WHERE name <> '' OR phone <> ''
+        `);
+
+        const matchedList = matchingRes.recordset;
+        if (matchedList.length === 0) {
+            return res.json({
+                success: true,
+                found: false,
+                visitCount: 0,
+                totalSpent: 0,
+                discountPercent: 0,
+                invoices: [],
+                customers: []
+            });
+        }
+
+        // 2. Với mỗi khách hàng tìm thấy, lấy thống kê chi tiêu & lịch sử hóa đơn / phiếu đặt bàn
+        const customers = [];
+        for (const item of matchedList) {
+            const custName = item.GuestName || '';
+            const custPhone = item.GuestPhone || '';
+
+            // Lấy lượt đến và tổng chi tiêu từ bảng Invoices
+            const statsReq = pool.request();
+            statsReq.input('CustName', sql.NVarChar, custName);
+            statsReq.input('CustPhone', sql.NVarChar, custPhone);
+            const statsRes = await statsReq.query(`
                 SELECT
-                    ISNULL(GuestName, '') AS GuestName,
-                    ISNULL(GuestPhone, '') AS GuestPhone,
                     COUNT(*) AS VisitCount,
                     ISNULL(SUM(TotalAmount), 0) AS TotalSpent
                 FROM Invoices
-                WHERE GuestPhone = @Keyword
-                   OR GuestName LIKE N'%' + @Keyword + N'%'
-                GROUP BY GuestName, GuestPhone
-                ORDER BY MAX(PaidAt) DESC
+                WHERE (GuestPhone = @CustPhone AND @CustPhone <> '')
+                   OR (GuestName = @CustName AND @CustName <> '')
             `);
 
-        const customers = result.recordset.map(row => {
-            const visitCount = parseInt(row.VisitCount || 0);
-            const totalSpent = parseFloat(row.TotalSpent || 0);
+            const visitCount = parseInt(statsRes.recordset[0]?.VisitCount || 0);
+            const totalSpent = parseFloat(statsRes.recordset[0]?.TotalSpent || 0);
             let discountPercent = 0;
             if (totalSpent >= 5000000) discountPercent = 7;
             else if (totalSpent >= 2000000) discountPercent = 5;
             else if (visitCount > 0 || totalSpent > 0) discountPercent = 2;
-            return {
-                name: row.GuestName || '',
-                phone: row.GuestPhone || '',
+
+            // Lấy lịch sử từ bảng Invoices
+            const invReq = pool.request();
+            invReq.input('CustName', sql.NVarChar, custName);
+            invReq.input('CustPhone', sql.NVarChar, custPhone);
+            const invRes = await invReq.query(`
+                SELECT TOP 50
+                    InvoiceID, BookingID, BookingCode, ISNULL(GuestName, '') AS GuestName,
+                    ISNULL(GuestPhone, '') AS GuestPhone, ISNULL(TableSummary, '') AS TableSummary,
+                    ISNULL(FoodSubtotal, 0) AS FoodSubtotal, ISNULL(DiscountPercent, 0) AS DiscountPercent,
+                    ISNULL(DiscountAmount, 0) AS DiscountAmount, ISNULL(DepositAmount, 0) AS DepositAmount,
+                    ISNULL(TotalAmount, 0) AS TotalAmount, ISNULL(PaymentMethod, '') AS PaymentMethod,
+                    PaidAt, ISNULL(Note, '') AS Note
+                FROM Invoices
+                WHERE (GuestPhone = @CustPhone AND @CustPhone <> '')
+                   OR (GuestName = @CustName AND @CustName <> '')
+                ORDER BY PaidAt DESC, InvoiceID DESC
+            `);
+
+            let invoices = invRes.recordset.map(row => ({
+                id: row.InvoiceID.toString(),
+                bookingId: row.BookingID ? row.BookingID.toString() : '',
+                bookingCode: row.BookingCode || '',
+                guestName: row.GuestName || '',
+                guestPhone: row.GuestPhone || '',
+                tableSummary: row.TableSummary || '',
+                foodSubtotal: parseFloat(row.FoodSubtotal || 0),
+                discountPercent: parseFloat(row.DiscountPercent || 0),
+                discountAmount: parseFloat(row.DiscountAmount || 0),
+                depositAmount: parseFloat(row.DepositAmount || 0),
+                totalAmount: parseFloat(row.TotalAmount || 0),
+                paymentMethod: row.PaymentMethod || '',
+                paidAt: row.PaidAt,
+                note: row.Note || ''
+            }));
+
+            // Nếu khách hàng chưa có hóa đơn trong Invoices, truy vấn bảng Bookings để hiển thị các lượt đặt bàn của khách
+            if (invoices.length === 0) {
+                const bookReq = pool.request();
+                bookReq.input('CustName', sql.NVarChar, custName);
+                bookReq.input('CustPhone', sql.NVarChar, custPhone);
+                const bookRes = await bookReq.query(`
+                    SELECT TOP 50
+                        BookingID, BookingCode, ISNULL(GuestName, '') AS GuestName,
+                        ISNULL(PhoneNumber, '') AS PhoneNumber, ISNULL(TableSummary, '') AS TableSummary,
+                        ISNULL(TotalAmount, 0) AS TotalAmount, CurrentStatus, DepositAmount, PaidAt, BookingDate, Note
+                    FROM Bookings
+                    WHERE (PhoneNumber = @CustPhone AND @CustPhone <> '')
+                       OR (GuestName = @CustName AND @CustName <> '')
+                    ORDER BY BookingID DESC
+                `);
+
+                invoices = bookRes.recordset.map(b => {
+                    const statusText = b.CurrentStatus === 'pending' ? 'Chờ nhận bàn' :
+                                      b.CurrentStatus === 'checked_in' ? 'Đang ăn' :
+                                      b.CurrentStatus === 'cancelled' ? 'Đã hủy' : b.CurrentStatus;
+                    const displayDate = b.PaidAt ? new Date(b.PaidAt).toISOString() :
+                                       (b.BookingDate ? new Date(b.BookingDate).toISOString() : new Date().toISOString());
+                    return {
+                        id: `BK_${b.BookingID}`,
+                        bookingId: b.BookingID.toString(),
+                        bookingCode: b.BookingCode || `BK${b.BookingID}`,
+                        guestName: b.GuestName || '',
+                        guestPhone: b.PhoneNumber || '',
+                        tableSummary: b.TableSummary || '',
+                        foodSubtotal: 0,
+                        discountPercent: 0,
+                        discountAmount: 0,
+                        depositAmount: parseFloat(b.DepositAmount || b.TotalAmount || 0),
+                        totalAmount: parseFloat(b.TotalAmount || 0),
+                        paymentMethod: 'cash',
+                        paidAt: displayDate,
+                        note: b.Note ? `${b.Note} | Đơn: ${statusText}` : `Phiếu đặt bàn (${statusText})`
+                    };
+                });
+            }
+
+            customers.push({
+                name: custName,
+                phone: custPhone,
                 visitCount,
                 totalSpent,
-                discountPercent
-            };
-        });
+                discountPercent,
+                invoices
+            });
+        }
 
-        const exactPhoneCustomer = customers.find(customer => customer.phone === phone);
-        const primaryCustomer = exactPhoneCustomer || customers[0] || {
+        const primaryCustomer = customers[0] || {
             visitCount: 0,
             totalSpent: 0,
-            discountPercent: 0
+            discountPercent: 0,
+            invoices: []
         };
 
         res.json({
@@ -266,6 +790,7 @@ app.get('/api/customers/lookup', async (req, res) => {
             visitCount: primaryCustomer.visitCount,
             totalSpent: primaryCustomer.totalSpent,
             discountPercent: primaryCustomer.discountPercent,
+            invoices: primaryCustomer.invoices || [],
             customers
         });
     } catch (error) {
@@ -477,6 +1002,8 @@ app.post('/api/bookings', async (req, res) => {
 
         const insertedBooking = insertResult.recordset[0];
 
+        await setTablesForSummary(pool, tableSummaryText, 'booked');
+
         res.status(201).json({
             success: true,
             message: "Đặt bàn thành công!",
@@ -541,16 +1068,33 @@ app.put('/api/bookings/status', async (req, res) => {
             }
 
             const availableTablesResult = await pool.request()
+                .input('Zone', sql.VarChar, zone)
                 .input('ZoneLike', sql.VarChar, zone + '%')
                 .input('TakeCount', sql.Int, tableCount)
                 .query(`
                     SELECT TOP (@TakeCount) *
                     FROM Tables
-                    WHERE TableNumber LIKE @ZoneLike
+                    WHERE (
+                        TableNumber LIKE @ZoneLike
+                        OR (
+                            LEFT(UPPER(TableNumber), 1) NOT IN ('A', 'B')
+                            AND TRY_CONVERT(INT, TableNumber) IS NOT NULL
+                            AND (
+                                (@Zone = 'A' AND TRY_CONVERT(INT, TableNumber) <= 6)
+                                OR (@Zone = 'B' AND TRY_CONVERT(INT, TableNumber) > 6)
+                            )
+                        )
+                    )
                       AND CurrentStatus = 'available'
                     ORDER BY
-                        LEFT(UPPER(TableNumber), 1),
-                        TRY_CONVERT(INT, SUBSTRING(TableNumber, 2, 20)),
+                        TRY_CONVERT(
+                            INT,
+                            CASE
+                                WHEN LEFT(UPPER(TableNumber), 1) IN ('A', 'B')
+                                    THEN SUBSTRING(TableNumber, 2, 20)
+                                ELSE TableNumber
+                            END
+                        ),
                         TableNumber
                 `);
 
@@ -852,8 +1396,21 @@ app.get('/api/tables', async (req, res) => {
                 SELECT *
                 FROM Tables
                 ORDER BY
-                    LEFT(UPPER(TableNumber), 1),
-                    TRY_CONVERT(INT, SUBSTRING(TableNumber, 2, 20)),
+                    CASE
+                        WHEN LEFT(UPPER(TableNumber), 1) IN ('A', 'B')
+                            THEN LEFT(UPPER(TableNumber), 1)
+                        WHEN TRY_CONVERT(INT, TableNumber) <= 6
+                            THEN 'A'
+                        ELSE 'B'
+                    END,
+                    TRY_CONVERT(
+                        INT,
+                        CASE
+                            WHEN LEFT(UPPER(TableNumber), 1) IN ('A', 'B')
+                                THEN SUBSTRING(TableNumber, 2, 20)
+                            ELSE TableNumber
+                        END
+                    ),
                     TableNumber
             `);
 
@@ -862,10 +1419,7 @@ app.get('/api/tables', async (req, res) => {
             tableNumber: row.TableNumber,
             capacity: row.Capacity,
             status: normalizeTableStatus(row.CurrentStatus),
-            zone:
-                row.TableNumber.startsWith('A')
-                    ? 'A'
-                    : 'B'
+            zone: deriveTableZone(row.TableNumber)
         }));
 
         res.json({
@@ -1403,7 +1957,38 @@ app.get('/api/invoices/:id', async (req, res) => {
         }
 
         const stored = result.recordset[0];
-        const summary = await calculatePaymentSummary(pool, stored.BookingID);
+        let summary;
+        try {
+            summary = await calculatePaymentSummary(pool, stored.BookingID);
+        } catch (error) {
+            if (error.statusCode !== 404) {
+                throw error;
+            }
+
+            const foodSubtotal = parseFloat(stored.FoodSubtotal || 0);
+            const discountPercent = parseFloat(stored.DiscountPercent || 0);
+            const discountAmount = parseFloat(stored.DiscountAmount || 0);
+            const depositAmount = parseFloat(stored.DepositAmount || 0);
+            const amountDue = parseFloat(stored.TotalAmount || 0);
+
+            summary = {
+                bookingId: parseInt(stored.BookingID || 0),
+                bookingCode: stored.BookingCode || '',
+                guestName: stored.GuestName || '',
+                guestPhone: stored.GuestPhone || '',
+                tableSummary: stored.TableSummary || '',
+                status: 'checked_out',
+                items: [],
+                foodSubtotal,
+                visitCount: 0,
+                previousSpent: 0,
+                discountPercent,
+                discountAmount,
+                amountAfterDiscount: Math.max(0, foodSubtotal - discountAmount),
+                depositAmount,
+                amountDue
+            };
+        }
 
         res.json({
             success: true,
@@ -1656,6 +2241,92 @@ app.get('/api/dashboard/stats', async (req, res) => {
     }
 });
 
+app.get('/api/dashboard/revenue/daily', async (req, res) => {
+    try {
+        const days = Math.min(Math.max(parseInt(req.query.days || '30', 10), 1), 365);
+        const pool = await getPool();
+        await ensurePaymentSchema(pool);
+        const result = await pool.request()
+            .input('Days', sql.Int, days)
+            .query(`
+                SELECT
+                    CONVERT(VARCHAR(10), CAST(PaidAt AS DATE), 120) AS period,
+                    COUNT(*) AS invoiceCount,
+                    ISNULL(SUM(TotalAmount), 0) AS revenue,
+                    ISNULL(SUM(FoodSubtotal), 0) AS foodSubtotal,
+                    ISNULL(SUM(DiscountAmount), 0) AS discountAmount,
+                    ISNULL(SUM(DepositAmount), 0) AS depositAmount
+                FROM Invoices
+                WHERE PaidAt >= DATEADD(DAY, -@Days + 1, CAST(GETDATE() AS DATE))
+                GROUP BY CAST(PaidAt AS DATE)
+                ORDER BY CAST(PaidAt AS DATE) ASC
+            `);
+
+        res.json({
+            success: true,
+            type: 'daily',
+            days,
+            data: result.recordset.map(row => ({
+                period: row.period,
+                invoiceCount: parseInt(row.invoiceCount || 0),
+                revenue: parseFloat(row.revenue || 0),
+                foodSubtotal: parseFloat(row.foodSubtotal || 0),
+                discountAmount: parseFloat(row.discountAmount || 0),
+                depositAmount: parseFloat(row.depositAmount || 0)
+            }))
+        });
+    } catch (error) {
+        console.error('Daily revenue error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Lỗi thống kê doanh thu ngày: ' + error.message
+        });
+    }
+});
+
+app.get('/api/dashboard/revenue/monthly', async (req, res) => {
+    try {
+        const months = Math.min(Math.max(parseInt(req.query.months || '12', 10), 1), 60);
+        const pool = await getPool();
+        await ensurePaymentSchema(pool);
+        const result = await pool.request()
+            .input('Months', sql.Int, months)
+            .query(`
+                SELECT
+                    CONVERT(VARCHAR(7), PaidAt, 120) AS period,
+                    COUNT(*) AS invoiceCount,
+                    ISNULL(SUM(TotalAmount), 0) AS revenue,
+                    ISNULL(SUM(FoodSubtotal), 0) AS foodSubtotal,
+                    ISNULL(SUM(DiscountAmount), 0) AS discountAmount,
+                    ISNULL(SUM(DepositAmount), 0) AS depositAmount
+                FROM Invoices
+                WHERE PaidAt >= DATEADD(MONTH, -@Months + 1, DATEFROMPARTS(YEAR(GETDATE()), MONTH(GETDATE()), 1))
+                GROUP BY CONVERT(VARCHAR(7), PaidAt, 120)
+                ORDER BY CONVERT(VARCHAR(7), PaidAt, 120) ASC
+            `);
+
+        res.json({
+            success: true,
+            type: 'monthly',
+            months,
+            data: result.recordset.map(row => ({
+                period: row.period,
+                invoiceCount: parseInt(row.invoiceCount || 0),
+                revenue: parseFloat(row.revenue || 0),
+                foodSubtotal: parseFloat(row.foodSubtotal || 0),
+                discountAmount: parseFloat(row.discountAmount || 0),
+                depositAmount: parseFloat(row.depositAmount || 0)
+            }))
+        });
+    } catch (error) {
+        console.error('Monthly revenue error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Lỗi thống kê doanh thu tháng: ' + error.message
+        });
+    }
+});
+
 // ======================================================
 // START SERVER
 // ======================================================
@@ -1670,7 +2341,15 @@ const httpServer = app.listen(PORT, '0.0.0.0', () => {
 });
 
 httpServer.on('error', error => {
-    console.error('Không thể khởi động HTTP server:', error);
+    if (error.code === 'EADDRINUSE') {
+        console.error(`\n❌ PORT ${PORT} đang được sử dụng bởi tiến trình khác (EADDRINUSE)!`);
+        console.error(`👉 Bạn có thể chạy lệnh sau để tự động giải phóng port ${PORT}:`);
+        console.error(`   npm run kill-port\n`);
+        console.error(`👉 Hoặc khởi động server với script dev (tự động kill port cũ):`);
+        console.error(`   npm run dev\n`);
+    } else {
+        console.error('Không thể khởi động HTTP server:', error);
+    }
     process.exit(1);
 });
 

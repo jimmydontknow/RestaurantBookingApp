@@ -1,6 +1,5 @@
 package com.example.restaurantbookingapp.screens
 
-import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -69,7 +68,7 @@ import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RestaurantUtilitiesScreen(navController: NavController) {
+fun Chapter5FeaturesScreen(navController: NavController) {
     val context = LocalContext.current
     val repository = remember { RestaurantRepository() }
     val scope = rememberCoroutineScope()
@@ -103,7 +102,6 @@ fun RestaurantUtilitiesScreen(navController: NavController) {
                     snapshot = result.data
                     networkMessage = "Đã đồng bộ dữ liệu nhà hàng"
                 }
-
                 is ApiResult.Error -> {
                     networkMessage = result.message
                 }
@@ -115,7 +113,7 @@ fun RestaurantUtilitiesScreen(navController: NavController) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Tiện ích nhà hàng", fontWeight = FontWeight.Bold) },
+                title = { Text("Tiện ích Chương 5", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
                     IconButton(onClick = { navController.navigateUp() }) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Quay lại")
@@ -135,7 +133,7 @@ fun RestaurantUtilitiesScreen(navController: NavController) {
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             FeatureCard(
-                title = "Đồng bộ dữ liệu",
+                title = "Kết nối mạng",
                 icon = Icons.Default.Sync,
                 description = networkMessage
             ) {
@@ -159,7 +157,7 @@ fun RestaurantUtilitiesScreen(navController: NavController) {
             }
 
             FeatureCard(
-                title = "Ảnh món ăn / không gian",
+                title = "Đa phương tiện",
                 icon = Icons.Default.Image,
                 description = "Chọn ảnh món ăn hoặc ảnh không gian nhà hàng để xem trong app"
             ) {
@@ -184,34 +182,14 @@ fun RestaurantUtilitiesScreen(navController: NavController) {
                 description = "Gọi điện, nhắn tin, gửi email hoặc chia sẻ thông tin đặt bàn"
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = {
-                            context.safeStart(
-                                Intent(Intent.ACTION_DIAL, Uri.parse("tel:0900000000"))
-                            )
-                        }
-                    ) {
+                    OutlinedButton(onClick = { context.safeStart(Intent(Intent.ACTION_DIAL, Uri.parse("tel:0900000000"))) }) {
                         Icon(Icons.Default.Call, contentDescription = null)
                         Text(" Gọi")
                     }
-                    OutlinedButton(
-                        onClick = {
-                            context.safeStart(
-                                Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:0900000000"))
-                                    .putExtra("sms_body", "Tôi muốn đặt bàn tại nhà hàng.")
-                            )
-                        }
-                    ) {
+                    OutlinedButton(onClick = { context.safeStart(Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:0900000000")).putExtra("sms_body", "Tôi muốn đặt bàn tại nhà hàng.")) }) {
                         Text("SMS")
                     }
-                    OutlinedButton(
-                        onClick = {
-                            context.safeStart(
-                                Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:restaurant@example.com"))
-                                    .putExtra(Intent.EXTRA_SUBJECT, "Yêu cầu đặt bàn")
-                            )
-                        }
-                    ) {
+                    OutlinedButton(onClick = { context.safeStart(Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:restaurant@example.com")).putExtra(Intent.EXTRA_SUBJECT, "Yêu cầu đặt bàn")) }) {
                         Icon(Icons.Default.Email, contentDescription = null)
                     }
                 }
@@ -220,10 +198,7 @@ fun RestaurantUtilitiesScreen(navController: NavController) {
                     onClick = {
                         val sendIntent = Intent(Intent.ACTION_SEND)
                             .setType("text/plain")
-                            .putExtra(
-                                Intent.EXTRA_TEXT,
-                                "Nhà hàng hỗ trợ đặt bàn, gọi món và thanh toán hóa đơn."
-                            )
+                            .putExtra(Intent.EXTRA_TEXT, "Nhà hàng hỗ trợ đặt bàn, gọi món và thanh toán hóa đơn.")
                         context.safeStart(Intent.createChooser(sendIntent, "Chia sẻ thông tin nhà hàng"))
                     }
                 ) {
@@ -237,7 +212,9 @@ fun RestaurantUtilitiesScreen(navController: NavController) {
                 icon = Icons.Default.Map,
                 description = "Mở bản đồ bằng trình duyệt để tránh lỗi Google Maps cũ trên emulator"
             ) {
-                Button(onClick = { context.openRestaurantMap() }) {
+                Button(
+                    onClick = { context.openRestaurantMap() }
+                ) {
                     Text("Mở bản đồ")
                 }
             }
@@ -277,7 +254,15 @@ private fun FeatureCard(
     }
 }
 
-private fun Context.openRestaurantMap() {
+private fun android.content.Context.safeStart(intent: Intent) {
+    try {
+        startActivity(intent)
+    } catch (_: Exception) {
+        Toast.makeText(this, "Thiết bị không có ứng dụng phù hợp", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun android.content.Context.openRestaurantMap() {
     val query = Uri.encode("nhà hàng gần đây")
     val webUri = Uri.parse("https://www.google.com/search?q=$query+google+maps")
     val browserPackages = listOf(
@@ -311,13 +296,5 @@ private fun Context.openRestaurantMap() {
         safeStart(fallbackIntent)
     } else {
         Toast.makeText(this, "Máy ảo chưa có trình duyệt để mở bản đồ", Toast.LENGTH_LONG).show()
-    }
-}
-
-private fun Context.safeStart(intent: Intent) {
-    try {
-        startActivity(intent)
-    } catch (_: Exception) {
-        Toast.makeText(this, "Thiết bị không có ứng dụng phù hợp", Toast.LENGTH_SHORT).show()
     }
 }

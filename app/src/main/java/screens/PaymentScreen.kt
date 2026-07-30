@@ -1,4 +1,4 @@
-package com.example.restaurantbookingapp.screens
+﻿package com.example.restaurantbookingapp.screens
 
 import android.content.Context
 import android.print.PrintAttributes
@@ -560,3 +560,4 @@ fun InvoiceRow(label: String, value: String) {
         Text(value, fontSize = 13.sp, fontWeight = FontWeight.Medium)
     }
 }
+

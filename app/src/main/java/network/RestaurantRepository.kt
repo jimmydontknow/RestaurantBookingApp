@@ -10,7 +10,7 @@ class RestaurantRepository(
         return when (val result = apiClient.get("/api/tables")) {
             is ApiResult.Success -> {
                 val json = JSONObject(result.data)
-                val count = json.optJSONArray("data")?.length() ?: 0
+                val count = json.firstArray("tables", "data", "items").length()
                 ApiResult.Success("Server hoạt động, đã nhận $count bàn")
             }
             is ApiResult.Error -> result
@@ -25,8 +25,8 @@ class RestaurantRepository(
         if (menu is ApiResult.Error) return menu
 
         return try {
-            val tableArray = JSONObject((tables as ApiResult.Success).data).optJSONArray("data") ?: JSONArray()
-            val menuArray = JSONObject((menu as ApiResult.Success).data).optJSONArray("data") ?: JSONArray()
+            val tableArray = JSONObject((tables as ApiResult.Success).data).firstArray("tables", "data", "items")
+            val menuArray = JSONObject((menu as ApiResult.Success).data).firstArray("items", "menu", "data")
             ApiResult.Success(
                 RestaurantSnapshot(
                     tableCount = tableArray.length(),
@@ -47,6 +47,13 @@ class RestaurantRepository(
             if (array.optJSONObject(index)?.optString("status") == status) count++
         }
         return count
+    }
+
+    private fun JSONObject.firstArray(vararg keys: String): JSONArray {
+        keys.forEach { key ->
+            optJSONArray(key)?.let { return it }
+        }
+        return JSONArray()
     }
 }
 

@@ -20,6 +20,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
+import com.example.restaurantbookingapp.network.ApiConfig
+import com.example.restaurantbookingapp.network.TokenManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -60,11 +62,15 @@ fun DashboardScreen(navController: NavController) {
         withContext(Dispatchers.IO) {
             var conn: HttpURLConnection? = null
             try {
-                val url = URL("http://10.0.2.2:3001/api/dashboard/stats")
+                val url = URL(ApiConfig.endpoint("/api/dashboard/stats"))
                 conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"
                 conn.connectTimeout = 5000
                 conn.readTimeout = 5000
+                val token = TokenManager.getToken()
+                if (!token.isNullOrBlank()) {
+                    conn.setRequestProperty("Authorization", "Bearer $token")
+                }
 
                 if (conn.responseCode == HttpURLConnection.HTTP_OK) {
                     val responseStr = conn.inputStream.bufferedReader().use { it.readText() }

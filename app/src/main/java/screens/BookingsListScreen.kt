@@ -1,4 +1,4 @@
-package com.example.restaurantbookingapp.screens
+﻿package com.example.restaurantbookingapp.screens
 
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -584,3 +584,4 @@ fun BookingCardWithStatus(
         }
     }
 }
+

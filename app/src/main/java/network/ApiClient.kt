@@ -1,4 +1,4 @@
-package com.example.restaurantbookingapp.network
+﻿package com.example.restaurantbookingapp.network
 
 import org.json.JSONObject
 import java.io.IOException
@@ -12,6 +12,7 @@ sealed class ApiResult<out T> {
 }
 
 object ApiConfig {
+    // 10.0.2.2 là địa chỉ host machine khi chạy trên Android Emulator
     const val BASE_URL = "http://10.0.2.2:3001"
 
     fun endpoint(path: String): String {
@@ -21,7 +22,13 @@ object ApiConfig {
 }
 
 object ApiClient {
-    fun get(path: String): ApiResult<String> = request(path, "GET")
+
+    // ----------------------------------------------------------------
+    // Public HTTP methods
+    // ----------------------------------------------------------------
+
+    fun get(path: String): ApiResult<String> =
+        request(path, "GET")
 
     fun post(path: String, body: JSONObject): ApiResult<String> =
         request(path, "POST", body.toString())
@@ -29,14 +36,38 @@ object ApiClient {
     fun put(path: String, body: JSONObject): ApiResult<String> =
         request(path, "PUT", body.toString())
 
-    private fun request(path: String, method: String, body: String? = null): ApiResult<String> {
+    fun delete(path: String): ApiResult<String> =
+        request(path, "DELETE")
+
+    fun deleteWithBody(path: String, body: JSONObject): ApiResult<String> =
+        request(path, "DELETE", body.toString())
+
+    // ----------------------------------------------------------------
+    // Internal request builder
+    // ----------------------------------------------------------------
+
+    private fun request(
+        path: String,
+        method: String,
+        body: String? = null
+    ): ApiResult<String> {
         var connection: HttpURLConnection? = null
         return try {
             connection = (URL(ApiConfig.endpoint(path)).openConnection() as HttpURLConnection).apply {
                 requestMethod = method
-                connectTimeout = 8000
-                readTimeout = 8000
+                connectTimeout = 10_000
+                readTimeout    = 15_000
                 setRequestProperty("Accept", "application/json")
+
+                // ── Đính kèm JWT token vào mọi request (trừ auth endpoints) ──
+                val isAuthPath = path.startsWith("/api/auth/") || path == "/api/health"
+                if (!isAuthPath) {
+                    val token = TokenManager.getToken()
+                    if (!token.isNullOrBlank()) {
+                        setRequestProperty("Authorization", "Bearer $token")
+                    }
+                }
+
                 if (body != null) {
                     doOutput = true
                     setRequestProperty("Content-Type", "application/json; charset=UTF-8")
@@ -45,8 +76,19 @@ object ApiClient {
             }
 
             val code = connection.responseCode
+
+            // ── 401: Token hết hạn hoặc không hợp lệ → xóa phiên ──
+            if (code == 401) {
+                TokenManager.clearSession()
+                val errorBody = connection.errorStream
+                    ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                val serverMsg = parseServerMessage(errorBody, "Phiên đăng nhập hết hạn")
+                return ApiResult.Error(serverMsg, 401)
+            }
+
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
             val response = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+
             if (code in 200..299) {
                 ApiResult.Success(response)
             } else {
@@ -63,6 +105,10 @@ object ApiClient {
         }
     }
 
+    // ----------------------------------------------------------------
+    // Helper: trích xuất message từ JSON response của server
+    // ----------------------------------------------------------------
+
     private fun parseServerMessage(response: String, fallback: String): String {
         return runCatching {
             val json = JSONObject(response)
@@ -72,3 +118,4 @@ object ApiClient {
         }.getOrDefault(fallback)
     }
 }
+
